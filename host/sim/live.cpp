@@ -37,6 +37,8 @@ const char* trueSurface(const Track& t, double x) {
       case TrackKind::POTHOLE: return "POTHOLE";
       case TrackKind::GRAVEL: return "GRAVEL";
       case TrackKind::RUMBLE: return "RUMBLE (unseen)";
+      case TrackKind::COBBLE: return "COBBLES";
+      case TrackKind::WASHBOARD: return "WASHBOARD";
     }
   }
   return "SMOOTH";

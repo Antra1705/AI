@@ -92,6 +92,7 @@ bool extractMlFeatures(const ImuBuffer& buf, float out[ML_FEATURE_COUNT]) {
   // multiply-adds at 10 Hz: small even for the ESP32).
   float w[N];
   for (int i = 0; i < N; ++i) w[i] = d[i] * hann[i];
+  float log_power_sum = 0.0f, power_sum = 0.0f;  // for spectral flatness
   for (int b = 0; b < 5; ++b) {
     float energy = 0.0f;
     for (int k = BAND_LO[b]; k <= BAND_HI[b]; ++k) {
@@ -103,13 +104,45 @@ bool extractMlFeatures(const ImuBuffer& buf, float out[ML_FEATURE_COUNT]) {
         idx += k;
         if (idx >= N) idx -= N;
       }
-      energy += (re * re + im * im) / (float)N;
+      float power = (re * re + im * im) / (float)N;
+      energy += power;
+      power_sum += power;
+      log_power_sum += logf(power + 1e-9f);
     }
     out[9 + b] = logf(energy + 1e-6f);
   }
 
   out[14] = logf(sqrtf(gvar / (float)N) + 1e-4f);
   out[15] = logf(gmax + 1e-4f);
+
+  // Short window: the last ML_SHORT_SAMPLES samples, relative to the 1 s mean.
+  float s2 = 0.0f, smax = -1e9f, smin = 1e9f, sjerk = 0.0f;
+  for (int i = N - ML_SHORT_SAMPLES; i < N; ++i) {
+    s2 += d[i] * d[i];
+    if (d[i] > smax) smax = d[i];
+    if (d[i] < smin) smin = d[i];
+    float j = instantJerk(buf.at(i - 1), buf.at(i));
+    if (j > sjerk) sjerk = j;
+  }
+  out[16] = logf(sqrtf(s2 / (float)ML_SHORT_SAMPLES) + EPS);
+  out[17] = logf(smax - smin + EPS);
+  out[18] = logf((smax > 0.0f ? smax : 0.0f) + EPS);
+  out[19] = logf((smin < 0.0f ? -smin : 0.0f) + EPS);
+  out[20] = logf(sjerk + 1.0f);
+
+  // Repetition: normalised autocorrelation peak, and spectral flatness.
+  const int bins = BAND_HI[4] - BAND_LO[0] + 1;
+  float best_ac = 0.0f;
+  if (sum2 > 1e-9f) {
+    for (int lag = 3; lag <= 40; ++lag) {
+      float ac = 0.0f;
+      for (int i = lag; i < N; ++i) ac += d[i] * d[i - lag];
+      ac /= sum2;
+      if (ac > best_ac) best_ac = ac;
+    }
+  }
+  out[21] = best_ac;
+  out[22] = power_sum > 1e-9f ? expf(log_power_sum / (float)bins) / (power_sum / (float)bins) : 1.0f;
   return true;
 }
 
@@ -117,6 +150,7 @@ const char* mlFeatureName(int i) {
   static const char* names[ML_FEATURE_COUNT] = {
       "log_rms",      "log_p2p",     "log_rise",     "log_drop",    "log_jerk_max", "log_jerk_rms",
       "swings",       "crest",       "log_kurtosis", "band_1_2hz",  "band_3_5hz",   "band_6_10hz",
-      "band_11_20hz", "band_21_49hz", "log_gyro_std", "log_gyro_rise"};
+      "band_11_20hz", "band_21_49hz", "log_gyro_std", "log_gyro_rise", "short_log_rms", "short_log_p2p",
+      "short_log_rise", "short_log_drop", "short_log_jerk_max", "autocorr_peak", "spectral_flatness"};
   return (i >= 0 && i < ML_FEATURE_COUNT) ? names[i] : "?";
 }

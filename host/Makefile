@@ -20,7 +20,7 @@ SIM_MAIN_OBJ := $(BUILD)/sim/sim_main.o
 TEST_OBJ     := $(patsubst tests/%.cpp,$(BUILD)/tests/%.o,$(wildcard tests/*.cpp))
 REPLAY_OBJ   := $(patsubst replay/%.cpp,$(BUILD)/replay/%.o,$(wildcard replay/*.cpp))
 TRAIN_OBJ    := $(patsubst train/%.cpp,$(BUILD)/train/%.o,$(wildcard train/*.cpp))
-HEADERS      := $(wildcard $(SRC_DIR)/*.h $(SRC_DIR)/core/*.h fakes/*.h tests/*.h sim/*.h train/*.h)
+HEADERS      := $(wildcard $(SRC_DIR)/*.h $(SRC_DIR)/core/*.h $(SRC_DIR)/esp32/dashboard_html.h fakes/*.h tests/*.h sim/*.h train/*.h)
 
 BIN := $(BUILD)/bin
 .PHONY: all test sim replay train clean

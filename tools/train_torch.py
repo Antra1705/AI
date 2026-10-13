@@ -37,24 +37,29 @@ from sklearn.metrics import f1_score, roc_auc_score
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 CLASSES = ["smooth", "gravel", "breaker", "pothole"]
 C = 4
-F = 16
+F = 21  # set from the dataset and --features in main()
 LABEL_OOD = 4
+# Feature groups (indices into the dataset's feature columns), for ablations.
+FEATURE_GROUPS = {"base": 16, "short": 21, "all": None}  # short = + last-0.25 s; all = + repetition features
+LABEL_OTHER = 5
 
 
 # ---------------------------------------------------------------- data
 
 def load(path):
+    """-> runs, labels, augmented flags, feature matrix (all feature columns), feature names."""
     with open(path, newline="") as f:
         reader = csv.reader(f)
         header = next(reader)
         rows = [r for r in reader]
     col = {name: i for i, name in enumerate(header)}
-    f0 = col["log_rms"]
+    f0, f1 = col["log_rms"], col["rule_pred"]
     data = np.array([[float(v) for v in r] for r in rows], dtype=np.float64)
     runs = data[:, col["run"]].astype(int)
     labels = data[:, col["label"]].astype(int)
-    feats = data[:, f0:f0 + F].astype(np.float32)
-    return runs, labels, feats
+    aug = data[:, col["aug"]].astype(int) if "aug" in col else np.zeros(len(rows), dtype=int)
+    feats = data[:, f0:f1].astype(np.float32)
+    return runs, labels, aug, feats, header[f0:f1]
 
 
 def split_of(run):
@@ -128,8 +133,15 @@ def train_epochs(model, x, y, weights, idx, epochs, lr, seed):
         for k in range(steps_per_epoch):
             b = order[k * 64:(k + 1) * 64]
             logits = model(x[b])
-            ce = torch.nn.functional.cross_entropy(logits, y[b], reduction="none")
-            w = weights[y[b]]
+            # Known surfaces: cross-entropy to the label. "Other" surfaces (y == C):
+            # cross-entropy to the uniform distribution (outlier exposure), so the
+            # model learns to be unsure on unfamiliar road.
+            logp = torch.log_softmax(logits, dim=1)
+            yb = y[b]
+            other = yb == C
+            ce_known = -logp.gather(1, torch.clamp(yb, max=C - 1).unsqueeze(1)).squeeze(1)
+            ce = torch.where(other, -logp.mean(dim=1), ce_known)
+            w = weights[yb]
             loss = (w * ce).sum() / w.sum()
             opt.zero_grad()
             loss.backward()
@@ -195,6 +207,10 @@ def ensemble(logits_list, t):
 
 
 def novelty(x, class_means, inv_cov):
+    """Squared Mahalanobis distance to the nearest class; inv_cov is (F,F) shared or (C,F,F) per class."""
+    if inv_cov.ndim == 3:
+        d = x[:, None, :] - class_means[None, :, :]
+        return np.einsum("nci,cij,ncj->nc", d, inv_cov, d).min(axis=1)
     d = x[:, None, :] - class_means[None, :, :]
     return np.einsum("nci,ij,ncj->nc", d, inv_cov, d).min(axis=1)
 
@@ -241,7 +257,7 @@ def write_model(path, source, members, hidden, mean, std, class_means, inv_cov, 
         f.write("const float kMean[%d] = {%s};\n" % (F, ", ".join(lit(v) for v in mean)))
         f.write("const float kStd[%d] = {%s};\n" % (F, ", ".join(lit(v) for v in std)))
         f.write("const float kClassMeans[%d] = {%s};\n" % (C * F, ", ".join(lit(v) for v in class_means.ravel())))
-        f.write("const float kInvCov[%d] = {%s};\n\n" % (F * F, ", ".join(lit(v) for v in inv_cov.ravel())))
+        f.write("const float kInvCov[%d] = {%s};\n\n" % (inv_cov.size, ", ".join(lit(v) for v in inv_cov.ravel())))
         for m, net in enumerate(nets):
             for l, (_, _, qw, qb, _, _) in enumerate(net):
                 f.write("const int8_t kW%d_%d[%d] = {%s};\n" % (m, l, qw.size, ",".join(str(int(v)) for v in qw.ravel())))
@@ -286,30 +302,54 @@ def main():
     ap.add_argument("--model", default=os.path.join(ROOT, "adaptive_suspension", "src", "core", "model_data.cpp"))
     ap.add_argument("--vectors", default=os.path.join(ROOT, "host", "tests", "model_vectors.h"))
     ap.add_argument("--report", default=os.path.join(ROOT, "docs", "model_report.md"))
+    ap.add_argument("--features", choices=sorted(FEATURE_GROUPS), default="all",
+                    help="feature group: base (16, 1 s window) or all (+5 from the last 0.25 s)")
+    ap.add_argument("--eval", action="append", default=[], metavar="NAME=CSV",
+                    help="also evaluate on another dataset (every run used as test), e.g. shifted=host/data/shifted.csv")
+    ap.add_argument("--no-export", action="store_true", help="report only; do not write the model files")
+    ap.add_argument("--oe", type=float, default=0.5,
+                    help="outlier-exposure weight for 'other' surfaces (label 5); 0 = ignore them")
     args = ap.parse_args()
     torch.set_num_threads(max(1, os.cpu_count() // 2))
 
-    runs, labels, feats = load(args.dataset)
+    global F
+    runs, labels, aug, feats, names = load(args.dataset)
+    n_sel = FEATURE_GROUPS[args.features] or len(names)
+    feats, names = feats[:, :n_sel], names[:n_sel]
+    F = n_sel
+    if not args.no_export and args.features != "all":
+        raise SystemExit("--features %s is for ablations: add --no-export (the cart uses all features)" % args.features)
     split = split_of(runs)
     known = (labels >= 0) & (labels < C)
-    tr, va, te = np.where(known & (split == 0))[0], np.where(known & (split == 1))[0], np.where(known & (split == 2))[0]
-    te_ood = np.where((labels == LABEL_OOD) & (split == 2))[0]
-    te_amb = np.where((labels < 0) & (split == 2))[0]
-    print("windows: train %d, val %d, test %d, test-OOD %d, test-ambiguous %d" % (len(tr), len(va), len(te), len(te_ood), len(te_amb)))
+    real = aug == 0  # augmented copies are used for training only
+    tr_known = np.where(known & (split == 0))[0]
+    other_tr = np.where((labels == LABEL_OTHER) & (split == 0))[0] if args.oe > 0 else np.array([], dtype=int)
+    tr = np.r_[tr_known, other_tr].astype(int)
+    va, te = np.where(known & real & (split == 1))[0], np.where(known & real & (split == 2))[0]
+    te_ood = np.where((labels == LABEL_OOD) & real & (split == 2))[0]
+    te_amb = np.where((labels < 0) & real & (split == 2))[0]
+    print("features: %s (%d)" % (args.features, F))
+    print("windows: train %d (+%d 'other' for outlier exposure), val %d, test %d, test-OOD %d, test-ambiguous %d"
+          % (len(tr_known), len(other_tr), len(va), len(te), len(te_ood), len(te_amb)))
 
-    mean = feats[tr].mean(axis=0)
-    std = np.maximum(feats[tr].std(axis=0), 1e-3).astype(np.float32)
+    mean = feats[tr_known].mean(axis=0)
+    std = np.maximum(feats[tr_known].std(axis=0), 1e-3).astype(np.float32)
     x = ((feats - mean) / std).astype(np.float32)
 
     # Novelty model: class-conditional Gaussian, shared covariance (LDA-style)
-    class_means = np.stack([x[tr][labels[tr] == c].mean(axis=0) for c in range(C)]).astype(np.float32)
-    d = x[tr] - class_means[labels[tr]]
-    cov = d.T.astype(np.float64) @ d.astype(np.float64) / len(tr) + 1e-3 * np.eye(F)
-    inv_cov = np.linalg.inv(cov).astype(np.float32)
+    class_means = np.stack([x[tr_known][labels[tr_known] == c].mean(axis=0) for c in range(C)]).astype(np.float32)
+    d = x[tr_known] - class_means[labels[tr_known]]
+    cov = d.T.astype(np.float64) @ d.astype(np.float64) / len(tr_known) + 1e-3 * np.eye(F)
+    inv_shared = np.linalg.inv(cov).astype(np.float32)  # previous novelty model, kept for comparison
+    # Deployed novelty model: one covariance per class (tighter fit around each surface).
+    inv_cov = np.stack([np.linalg.inv(np.cov(x[tr_known][labels[tr_known] == c].T.astype(np.float64)) + 1e-3 * np.eye(F))
+                        for c in range(C)]).astype(np.float32)
 
-    counts = np.bincount(labels[tr], minlength=C)
-    weights = torch.tensor(np.minimum(20.0, len(tr) / (C * np.maximum(counts, 1))), dtype=torch.float32)
-    xt, yt = torch.from_numpy(x), torch.from_numpy(np.where(known, labels, 0))
+    counts = np.bincount(labels[tr_known], minlength=C)
+    w_known = np.minimum(20.0, len(tr_known) / (C * np.maximum(counts, 1)))
+    weights = torch.tensor(np.r_[w_known, args.oe], dtype=torch.float32)  # index C = "other"
+    yt = torch.from_numpy(np.where(known, labels, np.where(labels == LABEL_OTHER, C, 0)))
+    xt = torch.from_numpy(x)
 
     float_nets, qat_nets, qat_models = [], [], []
     for m in range(args.members):
@@ -368,6 +408,9 @@ def main():
     single_conf, _ = ensemble([qat_logits[0]], best_t)
     single_conf = single_conf.max(axis=1)
     combo = np.maximum(np.maximum(mi_all / mi_thr, (1 - conf_all) / (1 - conf_thr)), nov_all / nov_thr)
+    nov_sh_all = novelty(x, class_means, inv_shared)
+    nov_sh_thr = float(np.quantile(nov_sh_all[va], 0.99, method="lower"))
+    combo_sh = np.maximum(np.maximum(mi_all / mi_thr, (1 - conf_all) / (1 - conf_thr)), nov_sh_all / nov_sh_thr)
 
     def auroc(score):
         if not len(te_ood):
@@ -399,7 +442,7 @@ def main():
               "", "## Uncertainty and safety fallback", "",
               "A window is flagged *uncertain* when confidence < %.3f or mutual information > %.4f" % (conf_thr, mi_thr),
               "(2.5th / 97.5th percentiles of correctly classified validation windows), or novelty",
-              "(squared Mahalanobis distance to the nearest class) > %.1f (99th percentile of validation)." % nov_thr,
+              "(squared Mahalanobis distance to the nearest class, one covariance per class) > %.1f (99th percentile of validation)." % nov_thr,
               "", "| | Value |", "|---|---|",
               "| Test windows accepted (coverage) | %.1f%% |" % (100 * (~unsure[te]).mean()),
               "| Accuracy on accepted windows | %.1f%% |" % (100 * (top_all[te] == labels[te])[~unsure[te]].mean()),
@@ -412,10 +455,61 @@ def main():
               "| AUROC, novelty (Mahalanobis) | %.3f |" % auroc(nov_all),
               "| AUROC, deployed rule (all three signals) | %.3f |" % auroc(combo),
               "| AUROC, single model 1 - confidence (simplified #8) | %.3f |" % auroc(1 - single_conf),
+              "| AUROC, same rule with one shared covariance (previous novelty model) | %.3f |" % auroc(combo_sh),
               "", "All numbers come from simulated data. Retrain on recordings from the real cart",
               "(log raw -> replay --label -> this script) before trusting them.", ""]
+    # Extra test sets (e.g. a different cart): every labelled window is test data.
+    summary = ["test %.1f%% F1 %.3f" % (100 * acc, f1), "unseen AUROC %.3f (shared-cov nov %.3f)" % (auroc(combo), auroc(combo_sh))]
+    ood_lines = []
+    if args.eval:
+        lines += ["## Other test sets", "",
+                  "Every run of these datasets is test data (never trained on). Impact recall: a true",
+                  "breaker or pothole recognised as breaker or pothole (both get full stiffness).", "",
+                  "| Test set | Classifier | Accuracy | Macro-F1 | smooth | gravel | breaker | pothole | impact recall | flagged uncertain |",
+                  "|---|---|---|---|---|---|---|---|---|---|"]
+    for spec in args.eval:
+        name, path = spec.split("=", 1)
+        e_runs, e_labels, e_aug, e_feats, _ = load(path)
+        keep = (e_labels >= 0) & (e_labels < C) & (e_aug == 0)
+        e_y, e_raw = e_labels[keep], e_feats[keep][:, :F]
+        e_x = ((e_raw - mean) / std).astype(np.float32)
+        e_p, e_mi = ensemble([int8_forward(net, e_x) for net in qat_nets], best_t)
+        e_conf, e_top = e_p.max(axis=1), e_p.argmax(axis=1)
+        e_nov = novelty(e_x, class_means, inv_cov)
+        e_unsure = (e_conf < conf_thr) | (e_mi > mi_thr) | (e_nov > nov_thr)
+        for clf, pred in (("rules", rules(e_raw, rule_thresholds())), ("model", e_top)):
+            a = (pred == e_y).mean()
+            f = f1_score(e_y, pred, labels=range(C), average="macro", zero_division=0)
+            rec = " | ".join("%.1f%%" % (100 * (pred[e_y == c] == c).mean()) for c in range(C))
+            impact = np.isin(pred[np.isin(e_y, [2, 3])], [2, 3]).mean()
+            flagged = "%.1f%%" % (100 * e_unsure.mean()) if clf == "model" else "-"
+            lines.append("| %s | %s | %.1f%% | %.3f | %s | %.1f%% | %s |" % (name, clf, 100 * a, f, rec, 100 * impact, flagged))
+            if clf == "model":
+                summary.append("%s %.1f%% F1 %.3f impact %.1f%%" % (name, 100 * a, f, 100 * impact))
+        # Unseen surface (rumble strip) in this test set
+        ood = (e_labels == LABEL_OOD) & (e_aug == 0)
+        if ood.any():
+            o_x = ((e_feats[ood][:, :F] - mean) / std).astype(np.float32)
+            o_p, o_mi = ensemble([int8_forward(net, o_x) for net in qat_nets], best_t)
+            o_nov = novelty(o_x, class_means, inv_cov)
+            s_in = np.maximum(np.maximum(e_mi / mi_thr, (1 - e_conf) / (1 - conf_thr)), e_nov / nov_thr)
+            s_out = np.maximum(np.maximum(o_mi / mi_thr, (1 - o_p.max(axis=1)) / (1 - conf_thr)), o_nov / nov_thr)
+            o_flag = (o_p.max(axis=1) < conf_thr) | (o_mi > mi_thr) | (o_nov > nov_thr)
+            o_auc = roc_auc_score(np.r_[np.zeros(len(s_in)), np.ones(len(s_out))], np.r_[s_in, s_out])
+            ood_lines.append("| %s | %.1f%% | %.3f |" % (name, 100 * o_flag.mean(), o_auc))
+            summary.append("%s unseen flagged %.1f%% AUROC %.3f" % (name, 100 * o_flag.mean(), o_auc))
+    if args.eval:
+        lines.append("")
+    if ood_lines:
+        lines += ["Unseen surface (rumble strip, never in training) in these test sets:", "",
+                  "| Test set | flagged uncertain | detection AUROC |", "|---|---|---|"] + ood_lines + [""]
     report = "\n".join(lines)
     print(report)
+    print("SUMMARY [%s, features=%s] %s" % (os.path.basename(args.dataset), args.features, " | ".join(summary)))
+    if args.no_export:
+        with open(args.report, "w") as f:
+            f.write(report)
+        return
 
     write_model(args.model, os.path.basename(args.dataset), args.members, args.hidden, mean, std, class_means, inv_cov,
                 qat_nets, best_t, mi_thr, conf_thr, nov_thr, acc, f1)

@@ -20,22 +20,29 @@
 
 #include "core/types.h"
 
-enum class TrackKind { GRAVEL, BREAKER, POTHOLE, RUMBLE };
+// COBBLE and WASHBOARD are "other" surfaces, used only to teach the classifier
+// what unfamiliar road looks like; RUMBLE stays unseen (uncertainty test).
+enum class TrackKind { GRAVEL, BREAKER, POTHOLE, RUMBLE, COBBLE, WASHBOARD };
 
 struct TrackFeature {
   TrackKind kind;
   double x0, x1;    // start / end position, m
   double size;      // gravel/rumble: roughness height m; breaker: height m; pothole: depth m
+  double param;     // cobble: stone length m; washboard: wavelength m (0 otherwise)
 };
 
 class Track {
  public:
-  explicit Track(unsigned seed);
+  // gravel_f_lo/hi: spatial frequency band of the gravel stones, cycles per metre
+  // (20-80 = stones of 1.2-5 cm; lower = bigger stones).
+  explicit Track(unsigned seed, double gravel_f_lo = 20.0, double gravel_f_hi = 80.0);
   void addSmooth(double len);
   void addGravel(double len, double rms_m);
   void addBreaker(double height_m, double length_m);
   void addPothole(double depth_m, double length_m);
   void addRumble(double len);
+  void addCobble(double len, double stone_m, double height_m);        // blocks with random height steps
+  void addWashboard(double len, double wavelength_m, double amp_m);   // regular corrugation
   // Live mode: make [from, to] plain smooth road with one reference bump at bump_at
   // (removes any feature overlapping that stretch).
   void placeReferenceBump(double from, double to, double bump_at, double height_m, double length_m);
@@ -45,7 +52,7 @@ class Track {
   double lateral(double x) const;    // left-right height difference, m (drives roll)
   const std::vector<TrackFeature>& features() const { return features_; }
 
-  // Base surface under position x: SMOOTH, GRAVEL, or -1 for rumble strip.
+  // Base surface under position x: SMOOTH, GRAVEL, -1 for rumble strip, -2 for cobble/washboard.
   int baseAt(double x) const;
 
  private:
@@ -79,6 +86,7 @@ struct VehicleParams {
   double accel_bias = 0.08, gyro_bias = 0.02;  // max magnitude, randomised per run
   double mount_tilt_deg = 3.0;                 // max, randomised per run
   double filter_hz = 21.0;
+  double vib_scale = 1.0;                      // motor / drivetrain vibration strength
 };
 
 struct VehicleTruth {

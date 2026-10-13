@@ -1,8 +1,13 @@
 // eval.h - simulator scenarios that measure the whole system in closed loop.
 #pragma once
 
-int evalTune();                   // per-surface damping characterisation -> curve targets
-int evalRoad(int runs);           // damping strategies: comfort, protection, servo wear, reaction
+#include "scenario.h"
+
+int evalTune(Domain domain = Domain::NOMINAL);  // per-surface damping characterisation -> curve targets
+
+// damping strategies: comfort, protection, servo wear, reaction, detection speed.
+// classify_ms <= 0 uses the App's default classification period.
+int evalRoad(int runs, Domain domain = Domain::NOMINAL, int classify_ms = 0);
 int evalObstacle();               // step vs Type-1 vs interval Type-2 fuzzy near obstacles
 int evalFaults();                 // sensor failures while driving
 int evalEkf(int runs);            // classifier-adaptive EKF vs fixed-noise EKF vs simple estimates

@@ -93,6 +93,7 @@ void App::begin() {
 
   next_imu_us_ = now_us;
   next_dist_ms_ = now_ms;
+  next_classify_ms_ = now_ms + classify_period_ms_;
   next_control_ms_ = now_ms + cfg::CONTROL_PERIOD_MS;
   next_status_ms_ = now_ms + cfg::STATUS_PERIOD_MS;
 
@@ -122,6 +123,11 @@ void App::tick() {
     manual_motor_ = false;
     say("Manual motor pulse finished");
     applyMotors(now_ms);
+  }
+
+  if (reached(now_ms, next_classify_ms_)) {
+    advance(next_classify_ms_, classify_period_ms_, now_ms);
+    classifyStep(now_ms);
   }
 
   if (reached(now_ms, next_control_ms_)) {
@@ -240,7 +246,7 @@ void App::imuStep(uint32_t now_us, uint32_t now_ms) {
 
   if (log_mode_ == LogMode::RAW) {
     char buf[96];
-    formatRaw(buf, sizeof buf, s);
+    formatRaw(buf, sizeof buf, s, motor_pwm_ < 0 ? 0 : motor_pwm_);
     hal_.console.print(buf);
   }
 }
@@ -288,7 +294,7 @@ void App::handleDistance(const DistanceReading& r, uint32_t now_ms) {
   updateSafety(now_ms);  // act on an obstacle immediately, not at the next control cycle
 }
 
-// ---------------------------------------------------------------- control (10 Hz)
+// ---------------------------------------------------------------- classification (~33 Hz) and control (10 Hz)
 
 void App::classify() {
   const bool ready = !imu_fault_ && buffer_.full();
@@ -331,10 +337,11 @@ void App::classify() {
   }
 }
 
-void App::controlStep(uint32_t now_ms) {
+// Runs every CLASSIFY_PERIOD_MS: a pothole is seen within ~30 ms instead of up
+// to 100 ms. Only the classifier and the curve's target run this often.
+void App::classifyStep(uint32_t now_ms) {
+  (void)now_ms;
   classify();
-  tracker_.update(decision_.top, decision_.uncertain || !decision_.valid);
-
   CurveInput in;
   in.valid = decision_.valid;
   for (int c = 0; c < 4; ++c) in.p[c] = decision_.p[c];
@@ -344,6 +351,16 @@ void App::controlStep(uint32_t now_ms) {
   in.vz = ekf_.vz();
   CurveThresholds th = {use_ml_ ? model_.mi_threshold : 0.0f, use_ml_ ? model_.novelty_threshold : 0.0f};
   curve_ = responseCurve(in, th);
+  // Stiffening reacts at this fast rate (protection); softening waits for the
+  // 10 Hz control step, so the servo does not chase every small change (wear).
+  if (graded_ && manual_servo_ < 0 && !imu_fault_ && supervisor_.state() != RunState::MAINT &&
+      curve_.angle > shaper_.target()) {
+    shaper_.setTarget(curve_.angle);
+  }
+}
+
+void App::controlStep(uint32_t now_ms) {
+  tracker_.update(decision_.top, decision_.uncertain || !decision_.valid);
 
   if (manual_servo_ >= 0) {
     // operator override: leave the servo alone
@@ -355,7 +372,7 @@ void App::controlStep(uint32_t now_ms) {
     servo_policy_.reset(cfg::SERVO_NEUTRAL);
     writeServo(cfg::SERVO_NEUTRAL);
   } else if (graded_) {
-    shaper_.setTarget(curve_.angle);  // the 100 Hz IMU step moves the servo toward it
+    shaper_.setTarget(curve_.angle);  // either direction; the 100 Hz IMU step moves the servo
   } else {
     servo_policy_.update(servoAngleFor(classification()), now_ms);
     writeServo(servo_policy_.angle());

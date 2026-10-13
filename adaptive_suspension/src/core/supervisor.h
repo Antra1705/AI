@@ -21,13 +21,7 @@ class Supervisor {
 
   bool start(bool imu_fault, bool dist_fault) { return enter(RunState::RUNNING, imu_fault, dist_fault); }
 
-  bool startMaint(bool imu_fault, bool dist_fault) {
-    if (state_ != RunState::IDLE) {
-      reason_ = "maintenance test only starts from IDLE";
-      return false;
-    }
-    return enter(RunState::MAINT, imu_fault, dist_fault);
-  }
+  bool startMaint(bool imu_fault, bool dist_fault) { return startTest(RunState::MAINT, imu_fault, dist_fault); }
 
   void stop() {
     state_ = RunState::IDLE;
@@ -58,6 +52,14 @@ class Supervisor {
   }
 
  private:
+  bool startTest(RunState s, bool imu_fault, bool dist_fault) {
+    if (state_ != RunState::IDLE) {
+      reason_ = "tests only start from IDLE";
+      return false;
+    }
+    return enter(s, imu_fault, dist_fault);
+  }
+
   bool enter(RunState s, bool imu_fault, bool dist_fault) {
     if (imu_fault || dist_fault) {
       reason_ = imu_fault ? "IMU not responding" : "distance sensor not responding";

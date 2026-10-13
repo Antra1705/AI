@@ -5,8 +5,9 @@
 // blocks; each job runs when its own timer is due:
 //   every 10 ms   read IMU -> buffer, EKF step, impact reflex, servo shaping
 //   every 40 ms   distance -> range tracker, emergency stop, APPROACH state
-//   every 100 ms  features -> classifier (+ uncertainty) -> response curve,
-//                 fuzzy speed, state machine, maintenance test
+//   every 30 ms   features -> classifier (+ uncertainty) -> response curve target
+//   every 100 ms  surface debouncing, fixed-angle mode, state machine,
+//                 maintenance timeout, CSV/JSON logging
 //   every 500 ms  status line (or JSON / CSV streams when logging)
 #pragma once
 #include <stdint.h>
@@ -65,6 +66,7 @@ class App {
   void setClassifierMl(bool ml) { use_ml_ = ml && model_.members > 0; }
   void setCurveGraded(bool graded);
   void setSpeedMode(SpeedMode m) { speed_mode_ = m; }
+  void setClassifyPeriod(uint32_t ms) { classify_period_ms_ = ms > 0 ? ms : 1; }  // for comparisons
   bool classifierMl() const { return use_ml_; }
   bool curveGraded() const { return graded_; }
   SpeedMode speedMode() const { return speed_mode_; }
@@ -76,6 +78,7 @@ class App {
   void imuStep(uint32_t now_us, uint32_t now_ms);
   void distanceStep(uint32_t now_ms);
   void handleDistance(const DistanceReading& r, uint32_t now_ms);
+  void classifyStep(uint32_t now_ms);
   void controlStep(uint32_t now_ms);
   void classify();
   void handleCommand(const Command& c, uint32_t now_ms);
@@ -127,6 +130,8 @@ class App {
 
   uint32_t next_imu_us_ = 0;
   uint32_t next_dist_ms_ = 0;
+  uint32_t next_classify_ms_ = 0;
+  uint32_t classify_period_ms_ = cfg::CLASSIFY_PERIOD_MS;
   uint32_t next_control_ms_ = 0;
   uint32_t next_status_ms_ = 0;
 

@@ -48,7 +48,8 @@ float mlNovelty(const MlEnsemble& m, const float x[ML_FEATURE_COUNT]) {
     float q = 0.0f;
     for (int i = 0; i < ML_FEATURE_COUNT; ++i) {
       float row = 0.0f;
-      for (int j = 0; j < ML_FEATURE_COUNT; ++j) row += m.inv_cov[i * ML_FEATURE_COUNT + j] * d[j];
+      const float* ic = m.inv_cov + c * ML_FEATURE_COUNT * ML_FEATURE_COUNT;
+      for (int j = 0; j < ML_FEATURE_COUNT; ++j) row += ic[i * ML_FEATURE_COUNT + j] * d[j];
       q += d[i] * row;
     }
     if (q < best) best = q;
@@ -59,9 +60,9 @@ float mlNovelty(const MlEnsemble& m, const float x[ML_FEATURE_COUNT]) {
 MlPrediction mlPredict(const MlEnsemble& m, const float features[ML_FEATURE_COUNT]) {
   MlPrediction r;
   r.valid = m.members > 0;
-  for (int c = 0; c < ML_CLASSES; ++c) r.p[c] = 1.0f / ML_CLASSES;
+  for (int c = 0; c < ML_CLASSES; ++c) r.p[c] = 1.0f / (float)ML_CLASSES;
   r.top = 0;
-  r.confidence = 1.0f / ML_CLASSES;
+  r.confidence = 1.0f / (float)ML_CLASSES;
   r.entropy = logf((float)ML_CLASSES);
   r.mutual_info = 0.0f;
   r.novelty = 0.0f;

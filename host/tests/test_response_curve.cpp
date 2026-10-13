@@ -62,7 +62,15 @@ TEST(curve_body_bounce_adds_damping) {
   CurveInput in = input(0, 0.99f);
   float calm = responseCurve(in, TH).s;
   in.vz = 0.2f;
-  CHECK_NEAR(responseCurve(in, TH).s - calm, cfg::CURVE_SKY_GAIN, 1e-5);
+  CHECK_NEAR(responseCurve(in, TH).s - calm, cfg::CURVE_SKY_GAIN * (1.0f - in.p[1]), 1e-5);
+}
+
+// On gravel the body vibrates constantly; extra stiffness would only transmit more.
+TEST(curve_body_bounce_term_is_off_on_gravel) {
+  CurveInput in = input(1, 0.99f);
+  float calm = responseCurve(in, TH).s;
+  in.vz = 0.2f;
+  CHECK(responseCurve(in, TH).s - calm < 0.01f);
 }
 
 TEST(shaper_stiffens_fast_softens_slow) {

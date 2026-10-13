@@ -1,6 +1,6 @@
 // train - trains the int8 road-surface classifier ensemble (no ML libraries).
 //
-//   train <dataset.csv> [--members 5] [--hidden 16] [--epochs 30] [--qat-epochs 12]
+//   train <dataset.csv> [--members 5] [--hidden 16] [--epochs 30] [--qat-epochs 12] [--oe 0.5]
 //         [--model ../adaptive_suspension/src/core/model_data.cpp]
 //         [--vectors tests/model_vectors.h] [--report ../docs/model_report.md]
 //
@@ -41,7 +41,7 @@ static const char* CLASS_NAMES[C] = {"smooth", "gravel", "breaker", "pothole"};
 // ---------------------------------------------------------------- data
 
 struct Sample {
-  int run, label, rule_pred;
+  int run, label, rule_pred, aug;
   float f[F];  // raw features
   float x[F];  // standardized
 };
@@ -49,10 +49,11 @@ struct Sample {
 struct Data {
   std::vector<Sample> all;
   std::vector<int> train, val, test;          // labelled windows 0..3
+  std::vector<int> train_other;               // "other" surfaces (label 5), outlier exposure
   std::vector<int> test_ood, test_ambiguous;  // for uncertainty evaluation
   float mean[F], std[F];
   float class_mean[C * F];  // class means of standardized features
-  float inv_cov[F * F];     // inverse pooled within-class covariance
+  float inv_cov[C * F * F]; // inverse covariance per class
 };
 
 // Gauss-Jordan inverse of an n x n matrix (row-major). Returns false if singular.
@@ -85,7 +86,7 @@ static bool invert(std::vector<double> a, int n, std::vector<double>& inv) {
   return true;
 }
 
-// Class-conditional Gaussian with shared covariance (as in LDA), fitted on training windows.
+// Class-conditional Gaussian, one covariance per class, fitted on training windows.
 static void fitNoveltyModel(Data& d) {
   double sum[C][F] = {{0}};
   int n[C] = {0};
@@ -96,24 +97,27 @@ static void fitNoveltyModel(Data& d) {
   }
   for (int c = 0; c < C; ++c)
     for (int k = 0; k < F; ++k) d.class_mean[c * F + k] = (float)(sum[c][k] / std::max(n[c], 1));
-  std::vector<double> cov(F * F, 0.0);
-  for (int i : d.train) {
-    const Sample& s = d.all[i];
-    double dv[F];
-    for (int k = 0; k < F; ++k) dv[k] = s.x[k] - d.class_mean[s.label * F + k];
-    for (int a = 0; a < F; ++a)
-      for (int b = 0; b < F; ++b) cov[a * F + b] += dv[a] * dv[b];
+  for (int c = 0; c < C; ++c) {
+    std::vector<double> cov(F * F, 0.0);
+    for (int i : d.train) {
+      const Sample& s = d.all[i];
+      if (s.label != c) continue;
+      double dv[F];
+      for (int k = 0; k < F; ++k) dv[k] = s.x[k] - d.class_mean[c * F + k];
+      for (int a = 0; a < F; ++a)
+        for (int b = 0; b < F; ++b) cov[a * F + b] += dv[a] * dv[b];
+    }
+    for (int a = 0; a < F; ++a) {
+      for (int b = 0; b < F; ++b) cov[a * F + b] /= std::max(n[c] - 1, 1);
+      cov[a * F + a] += 1e-3;  // ridge for numerical safety
+    }
+    std::vector<double> inv;
+    if (!invert(cov, F, inv)) {
+      std::fprintf(stderr, "covariance of class %d not invertible\n", c);
+      std::exit(1);
+    }
+    for (int k = 0; k < F * F; ++k) d.inv_cov[c * F * F + k] = (float)inv[k];
   }
-  for (int a = 0; a < F; ++a) {
-    for (int b = 0; b < F; ++b) cov[a * F + b] /= d.train.size();
-    cov[a * F + a] += 1e-3;  // ridge for numerical safety
-  }
-  std::vector<double> inv;
-  if (!invert(cov, F, inv)) {
-    std::fprintf(stderr, "covariance not invertible\n");
-    std::exit(1);
-  }
-  for (int k = 0; k < F * F; ++k) d.inv_cov[k] = (float)inv[k];
 }
 
 static int splitOf(int run) {
@@ -138,6 +142,7 @@ static bool loadData(const char* path, Data& d) {
     return -1;
   };
   int c_run = col("run"), c_label = col("label"), c_rule = col("rule_pred"), c_f0 = col(mlFeatureName(0));
+  int c_aug = col("aug");
   if (c_run < 0 || c_label < 0 || c_f0 < 0) return false;
 
   std::vector<double> v(cols.size());
@@ -151,6 +156,7 @@ static bool loadData(const char* path, Data& d) {
     s.run = (int)v[c_run];
     s.label = (int)v[c_label];
     s.rule_pred = c_rule >= 0 ? (int)v[c_rule] : -1;
+    s.aug = c_aug >= 0 ? (int)v[c_aug] : 0;
     for (int k = 0; k < F; ++k) s.f[k] = (float)v[c_f0 + k];
     d.all.push_back(s);
   }
@@ -158,8 +164,11 @@ static bool loadData(const char* path, Data& d) {
   for (int i = 0; i < (int)d.all.size(); ++i) {
     const Sample& s = d.all[i];
     int sp = splitOf(s.run);
+    if (s.aug && sp != 0) continue;  // augmented copies are for training only
     if (s.label >= 0 && s.label < C) {
       (sp == 0 ? d.train : sp == 1 ? d.val : d.test).push_back(i);
+    } else if (s.label == 5 && sp == 0) {
+      d.train_other.push_back(i);
     } else if (sp == 2) {
       (s.label == 4 ? d.test_ood : d.test_ambiguous).push_back(i);
     }
@@ -270,7 +279,9 @@ static float backward(Net& n, const Trace& t, const float logits[C], int label, 
   float p[C];
   softmax(logits, p);
   float dz[ML_MAX_WIDTH];
-  for (int c = 0; c < C; ++c) dz[c] = weight * (p[c] - (c == label ? 1.0f : 0.0f));
+  // label == C: an "other" surface - the target is the uniform distribution
+  // (outlier exposure), so the model learns to be unsure on unfamiliar road.
+  for (int c = 0; c < C; ++c) dz[c] = weight * (p[c] - (label == C ? 1.0f / C : (c == label ? 1.0f : 0.0f)));
   for (int l = ML_LAYERS - 1; l >= 0; --l) {
     Layer& L = n.L[l];
     float da[ML_MAX_WIDTH] = {0};
@@ -283,6 +294,11 @@ static float backward(Net& n, const Trace& t, const float logits[C], int label, 
     }
     if (l == 0) break;
     for (int i = 0; i < L.in; ++i) dz[i] = (t.pass[l][i] && t.z[l - 1][i] > 0.0f) ? da[i] : 0.0f;
+  }
+  if (label == C) {
+    float mean_logp = 0;
+    for (int c = 0; c < C; ++c) mean_logp += std::log(std::max(p[c], 1e-7f)) / C;
+    return -weight * mean_logp;
   }
   return -weight * std::log(std::max(p[label], 1e-7f));
 }
@@ -305,7 +321,7 @@ static void adamStep(Net& n, float lr, int step, float batch_weight) {
   }
 }
 
-static void trainEpochs(Net& n, const Data& d, const std::vector<int>& idx, const float cw[C], int epochs,
+static void trainEpochs(Net& n, const Data& d, const std::vector<int>& idx, const float cw[C + 1], int epochs,
                         float lr0, std::mt19937& rng, const char* tag) {
   std::vector<int> order = idx;
   int step = 0;
@@ -322,8 +338,9 @@ static void trainEpochs(Net& n, const Data& d, const std::vector<int>& idx, cons
         Trace t;
         float z[C];
         forward(n, s.x, t, z);
-        loss += backward(n, t, z, s.label, cw[s.label]);
-        wsum += cw[s.label];
+        const int lab = s.label < C ? s.label : C;
+        loss += backward(n, t, z, lab, cw[lab]);
+        wsum += cw[lab];
       }
       wsum_all += wsum;
       adamStep(n, lr, ++step, wsum);
@@ -460,6 +477,7 @@ int main(int argc, char** argv) {
     return 2;
   }
   int members = 5, hidden = 16, epochs = 30, qat_epochs = 12;
+  float oe = 0.5f;
   std::string model_path = "../adaptive_suspension/src/core/model_data.cpp";
   std::string vectors_path = "tests/model_vectors.h";
   std::string report_path = "../docs/model_report.md";
@@ -469,6 +487,7 @@ int main(int argc, char** argv) {
     else if (k == "--hidden") hidden = std::atoi(argv[i + 1]);
     else if (k == "--epochs") epochs = std::atoi(argv[i + 1]);
     else if (k == "--qat-epochs") qat_epochs = std::atoi(argv[i + 1]);
+    else if (k == "--oe") oe = (float)std::atof(argv[i + 1]);
     else if (k == "--model") model_path = argv[i + 1];
     else if (k == "--vectors") vectors_path = argv[i + 1];
     else if (k == "--report") report_path = argv[i + 1];
@@ -489,8 +508,9 @@ int main(int argc, char** argv) {
   }
   int count[C] = {0};
   for (int i : d.train) count[d.all[i].label]++;
-  float cw[C];
+  float cw[C + 1];
   for (int c = 0; c < C; ++c) cw[c] = std::min(20.0f, (float)d.train.size() / (C * std::max(count[c], 1)));
+  cw[C] = oe;  // outlier-exposure weight for "other" surfaces
   std::fprintf(stderr, "windows: train %zu, val %zu, test %zu, test-OOD %zu, test-ambiguous %zu\n", d.train.size(),
                d.val.size(), d.test.size(), d.test_ood.size(), d.test_ambiguous.size());
 
@@ -500,8 +520,10 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "member %d/%d\n", m + 1, members);
     std::mt19937 rng(1234 + 97 * m);
     std::vector<int> boot;
-    std::uniform_int_distribution<size_t> pick(0, d.train.size() - 1);
-    for (size_t i = 0; i < d.train.size(); ++i) boot.push_back(d.train[pick(rng)]);
+    std::vector<int> pool = d.train;
+    if (oe > 0) pool.insert(pool.end(), d.train_other.begin(), d.train_other.end());
+    std::uniform_int_distribution<size_t> pick(0, pool.size() - 1);
+    for (size_t i = 0; i < pool.size(); ++i) boot.push_back(pool[pick(rng)]);
     Net& n = float_nets[m];
     initNet(n, hidden, rng);
     trainEpochs(n, d, boot, cw, epochs, 3e-3f, rng, "float");
@@ -661,8 +683,8 @@ int main(int argc, char** argv) {
     for (int k = 0; k < F; ++k) std::fprintf(f, "%s%#.9gf", k ? ", " : "", d.std[k]);
     std::fprintf(f, "};\nconst float kClassMeans[%d] = {", C * F);
     for (int k = 0; k < C * F; ++k) std::fprintf(f, "%s%#.9gf", k ? ", " : "", d.class_mean[k]);
-    std::fprintf(f, "};\nconst float kInvCov[%d] = {", F * F);
-    for (int k = 0; k < F * F; ++k) std::fprintf(f, "%s%#.9gf", k ? ", " : "", d.inv_cov[k]);
+    std::fprintf(f, "};\nconst float kInvCov[%d] = {", C * F * F);
+    for (int k = 0; k < C * F * F; ++k) std::fprintf(f, "%s%#.9gf", k ? ", " : "", d.inv_cov[k]);
     std::fprintf(f, "};\n\n");
     for (int m = 0; m < members; ++m)
       for (int l = 0; l < ML_LAYERS; ++l) {
@@ -745,7 +767,7 @@ int main(int argc, char** argv) {
           double q = 0;
           for (int a = 0; a < F; ++a)
             for (int b = 0; b < F; ++b)
-              q += (d.all[pick[k]].x[a] - d.class_mean[c * F + a]) * d.inv_cov[a * F + b] *
+              q += (d.all[pick[k]].x[a] - d.class_mean[c * F + a]) * d.inv_cov[c * F * F + a * F + b] *
                    (d.all[pick[k]].x[b] - d.class_mean[c * F + b]);
           best = std::min(best, q);
         }

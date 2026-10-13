@@ -109,9 +109,9 @@ int formatMaint(char* buf, size_t n, const MaintState& m) {
   return k;
 }
 
-int formatRaw(char* buf, size_t n, const ImuSample& s) {
-  return snprintf(buf, n, "R,%lu,%.3f,%.3f,%.3f,%.4f,%.4f,%.4f\n", (unsigned long)s.t_us, (double)s.ax,
-                  (double)s.ay, (double)s.az, (double)s.gx, (double)s.gy, (double)s.gz);
+int formatRaw(char* buf, size_t n, const ImuSample& s, int pwm) {
+  return snprintf(buf, n, "R,%lu,%.3f,%.3f,%.3f,%.4f,%.4f,%.4f,%d\n", (unsigned long)s.t_us, (double)s.ax,
+                  (double)s.ay, (double)s.az, (double)s.gx, (double)s.gy, (double)s.gz, pwm);
 }
 
 int formatFeatures(char* buf, size_t n, uint32_t t_ms, const Features& f, const Classification& c, int servo) {
@@ -121,7 +121,7 @@ int formatFeatures(char* buf, size_t n, uint32_t t_ms, const Features& f, const 
                   (double)c.confidence, servo);
 }
 
-bool parseRawLine(const char* line, ImuSample* out) {
+bool parseRawLine(const char* line, ImuSample* out, int* pwm) {
   if (line[0] != 'R' || line[1] != ',') return false;
   const char* p = line + 2;
   char* end = 0;
@@ -134,6 +134,14 @@ bool parseRawLine(const char* line, ImuSample* out) {
     if (end == p) return false;
     if (i < 5 && *end != ',') return false;
     p = end + 1;
+  }
+  if (pwm) {
+    *pwm = -1;
+    if (*end == ',') {
+      char* e2 = 0;
+      long pv = strtol(end + 1, &e2, 10);
+      if (e2 != end + 1) *pwm = (int)pv;
+    }
   }
   out->t_us = (uint32_t)t;
   out->ax = v[0]; out->ay = v[1]; out->az = v[2];

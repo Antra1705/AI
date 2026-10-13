@@ -136,7 +136,7 @@ The original fixed angles below are kept as the fallback mode (`curve discrete`)
 ### BR-6 Fast reaction — **M**
 From the moment an impact appears in the IMU data, the servo command must be issued within **100 ms**.
 - **Acceptance:** Measured with timestamps in the serial log, ≥ 95% of pothole events show impact-to-command ≤ 100 ms.
-- *Note:* Physical servo travel takes extra time, see issue I-9. There are two paths. A one-sample reflex covers very hard hits (command within 10 ms). Other potholes go through the 10 Hz classifier: command within about 100 ms, and the servo physically stiff after about 200 ms in simulation.
+- *Note:* Physical servo travel takes extra time, see issue I-9. There are two paths. A one-sample reflex covers very hard hits (command within 10 ms). Other potholes go through the classifier, which runs every 30 ms: impact recognised in 27 ms on average (37 ms at the 90th percentile), and the servo physically stiff after about 131 ms in simulation.
 - SRA ref: Functional Requirements (Classification Latency)
 
 ### BR-7 Obstacle avoidance — **M**
@@ -187,7 +187,7 @@ The system should have a mode that streams raw features as CSV over serial, so t
 
 ### BR-14 Trained road-surface model — **M**
 The classifier must be a model trained on windowed IMU data with engineered features (jerk, peak-to-peak, FFT band energies and others), not hand-set thresholds alone.
-- **Acceptance:** On held-out drives, accuracy ≥ 90% per surface, and higher than the rule-based baseline on the same data. *(Simulation: 99.3% vs 83.9%.)*
+- **Acceptance:** On held-out drives, accuracy ≥ 90% per surface, and higher than the rule-based baseline on the same data; it should also hold up on a cart it was not trained on. *(Simulation: 99.7% on unseen normal carts vs 84.1% for rules; 97.9% on a different cart vs 38.9% for rules. Speed-breaker recall on the different cart is 82%, below the 90% target; most of the misses are called "pothole", which gets the same full stiffness, so 99.7% of breakers and potholes are recognised as an impact.)*
 
 ### BR-15 8-bit deployment (quantization-aware training) — **M**
 The model must run in 8-bit integer arithmetic on the ESP32, trained with quantization-aware training.
@@ -195,11 +195,11 @@ The model must run in 8-bit integer arithmetic on the ESP32, trained with quanti
 
 ### BR-16 Uncertainty and safety fallback — **M**
 The system must estimate its own uncertainty (ensemble disagreement and input novelty) and fall back to a safe behaviour when unsure: a safe middle stiffness, plus lower speed.
-- **Acceptance:** Accepted windows are more accurate than flagged ones, and uncertainty measurably shifts the damping and speed commands. *(Simulation: 99.9% vs 88.3%. Detection of a never-seen surface is weak, AUROC 0.78; see docs/ALGORITHMS.md.)*
+- **Acceptance:** Accepted windows are more accurate than flagged ones, and uncertainty measurably shifts the damping and speed commands. *(Simulation: 99.8% vs 82.0%. A never-seen surface is ranked as unusual with AUROC 0.87 (0.60 before repetition features, outlier exposure and per-surface novelty), but only 6–8% of its windows cross the alarm threshold; it receives soft, gravel-like damping. See docs/ALGORITHMS.md.)*
 
 ### BR-17 Graded confidence-to-damping curve — **M** (core contribution)
 The damping command must be a continuous function of the class probabilities and confidence, shaped to the actuator's response time, not a binary or per-class switch.
-- **Acceptance:** In closed loop, fewer bottom-outs and lower impact peaks than the SRA fixed-angle design, with no missed potholes. *(Simulation: −51% bottom-outs, −57% impact peak, 0 misses vs 16 for the same classifier on fixed angles.)*
+- **Acceptance:** In closed loop, fewer bottom-outs and lower impact peaks than the SRA fixed-angle design, with no missed potholes. *(Simulation: −54% bottom-outs, −62% impact peak, 0 misses vs 2 for the same classifier on fixed angles; −47% servo travel. On a heavier, softer-sprung cart, bottom-outs at breakers and potholes are lower than the SRA design (4.26 vs 4.68 per event), but light bump-stop touches on gravel make the total slightly higher (5.79 vs 5.26).)*
 
 ### BR-18 Extended Kalman Filter — **S**
 The system should estimate attitude, gyro bias and vertical body velocity with an EKF, using classifier confidence to set the accelerometer noise.
@@ -236,20 +236,21 @@ The system should stream state, classification, uncertainty, actuator and mainte
 ### 7.3 Dependencies on hardware (interface contract)
 The hardware teammate must confirm the following before coding starts:
 
-| Signal | SRA pin | Status |
+Confirmed by the hardware teammate's wiring guide (38-pin ESP32 NodeMCU); implemented in
+`adaptive_suspension/src/esp32/board_config.h`:
+
+| Signal | Pin | Status |
 |---|---|---|
-| I2C SDA / SCL (MPU6050) | GPIO 21 / 22 | Given |
-| Servo PWM | GPIO 33 | Given |
-| Motor A ENA (PWM) | GPIO 18 | Given |
-| Motor B ENB (PWM) | GPIO 19 | Given |
-| Motor A IN1 / IN2 | GPIO 27 / 14 (from Data Flow section only) | **Confirm** |
-| Motor B IN3 / IN4 | — | **Missing** |
-| HC-SR04 TRIG / ECHO | — | **Missing** |
-| Start / stop button (BR-2) | — | **New, needs a pin** |
+| I2C SDA / SCL (MPU6050, AD0 to GND, 0x68) | GPIO 21 / 22 | Confirmed |
+| Servo PWM | GPIO 33 | Confirmed |
+| Left motor ENA (PWM) / IN1 / IN2 | GPIO 18 / 27 / 14 | Confirmed |
+| Right motor ENB (PWM) / IN3 / IN4 | GPIO 19 / 23 / 13 | Confirmed |
+| HC-SR04 TRIG / ECHO (ECHO via 1k/2k divider) | GPIO 25 / 26 | Confirmed |
+| Start / stop button to GND (BR-2) | GPIO 4, internal pull-up | Confirmed (optional) |
 
 Also needed from hardware:
 - The HC-SR04 ECHO pin outputs 5 V and the ESP32 is 3.3 V, so a voltage divider or level shifter is required.
-- The servo needs its own 5 V supply. Powering it from the ESP32's 3.3 V pin causes brown-out resets.
+- The servo needs a 5 V supply, not the ESP32's 3.3 V pin. The wiring guide powers it from the L298N's 5 V regulator, which also feeds the ESP32 and the sonar; that regulator (about 0.5 A) may be too small for a servo that moves often, so a separate 5 V buck converter (or at least a large capacitor at the servo) is recommended. The firmware reports a brown-out as the reset reason, so the problem is easy to spot.
 - The measured top speed of the cart at PWM 200.
 
 ---
@@ -286,8 +287,7 @@ All hardware-independent software for BR-1 to BR-21 is written and tested agains
 physical simulation of the cart: 128 unit and closed-loop tests, plus the
 evaluations in `docs/simulation_results.txt`. Still to do once the hardware
 exists:
-- ESP32 drivers, pin map and Arduino sketch;
-- WiFi serving of the dashboard;
+- bring-up of the ESP32 firmware on the cart (drivers, pin map, sketch and WiFi dashboard are written for the agreed wiring, not yet run on hardware; `docs/HARDWARE_BRINGUP.md`);
 - real recordings, then retraining and recalibration (`replay --label`, `train`, `calibrate.py`, repeating the `sim tune` procedure on the bench);
 - measured speed, braking and servo slew;
 - accelerometer offset calibration;

@@ -3,8 +3,8 @@
 // Values marked CALIBRATE are starting points. Replace them with the numbers
 // printed by tools/calibrate.py once real data from the cart is available.
 //
-// Pin numbers are intentionally NOT here yet: they belong to the hardware
-// drivers, which are added once the hardware is available.
+// Pin numbers are not here: they belong to the hardware drivers, see
+// esp32/board_config.h.
 #pragma once
 #include <stdint.h>
 
@@ -16,7 +16,8 @@ namespace cfg {
 constexpr uint32_t IMU_PERIOD_US       = 10000;  // 100 Hz IMU sampling (BR-3)
 constexpr int      IMU_BUFFER_SIZE     = 100;    // 1 second of samples
 constexpr uint32_t DIST_PERIOD_MS      = 40;     // distance check 25x per second (fixes I-10)
-constexpr uint32_t CONTROL_PERIOD_MS   = 100;    // classify + servo decision at 10 Hz
+constexpr uint32_t CLASSIFY_PERIOD_MS  = 30;     // classifier + damping curve at ~33 Hz (fast reaction)
+constexpr uint32_t CONTROL_PERIOD_MS   = 100;    // state machine, fixed-angle mode, logging at 10 Hz
 constexpr uint32_t STATUS_PERIOD_MS    = 500;    // status line at 2 Hz (BR-10)
 constexpr uint32_t WATCHDOG_TIMEOUT_MS = 2000;   // reset if the loop stalls (BR-9)
 
@@ -106,9 +107,11 @@ constexpr float CURVE_C_HIGH      = 0.90f;  // ... and where it is full
 constexpr float CURVE_RISK_GAIN   = 0.9f;   // floor = gain * P(breaker or pothole)
 constexpr float CURVE_SKY_GAIN    = 0.15f;  // extra stiffness when the body bounces (EKF vz)
 constexpr float CURVE_SKY_VREF    = 0.05f;  // m/s of vertical velocity for the full extra
+constexpr float CURVE_SKY_GRAVEL_GATE = 1.0f;  // body-motion term off in proportion to P(gravel):
+                                               // 'sim road' -13% gravel vibration, -34% servo travel
 constexpr float SLEW_UP_DEG_S     = 300.0f; // MG90S under load (~60 deg / 0.2 s): stiffen at full speed
 constexpr float SLEW_DOWN_DEG_S   = 60.0f;  // soften slowly, avoids pumping and servo wear
-constexpr int   SERVO_DEADBAND_DEG = 2;     // ignore smaller changes (jitter, wear)
+constexpr int   SERVO_DEADBAND_DEG = 3;     // ignore smaller changes (jitter, wear); 3 vs 2: -2.5% travel, same ride
 constexpr int   SURFACE_CONFIRM   = 2;      // windows in a row before the reported surface changes
 
 // ---------------- Speed control near obstacles (fuzzy_speed.h) ----------------

@@ -80,7 +80,7 @@ def load_dataset(path):
     with open(path, newline="") as f:
         for r in csv.DictReader(f):
             label = int(r["label"])
-            if label < 0 or label > 3 or int(r["run"]) % 20 >= 14:
+            if label < 0 or label > 3 or int(r["run"]) % 20 >= 14 or r.get("aug", "0") == "1":
                 continue
             data[SURFACES[label]].append({
                 "jerk_max": math.exp(float(r["log_jerk_max"])) - 1.0,

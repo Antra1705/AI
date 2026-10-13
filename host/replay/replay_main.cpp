@@ -13,7 +13,8 @@
 //       --event-p2p get the label (the rest is road between the events, -1).
 //       Give each recording its own --run number; train splits by run.
 //
-// Input: "R,t_us,ax,ay,az,gx,gy,gz" lines (from 'log raw' or 'sim record'); other lines ignored.
+// Input: "R,t_us,ax,ay,az,gx,gy,gz[,pwm]" lines (from 'log raw' or 'sim record'); other lines
+// ignored. Logs without the PWM column are treated as PWM 200 (normal cruising), with a warning.
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -102,13 +103,13 @@ int main(int argc, char** argv) {
 
   ImuBuffer buf;
   int counts[SURFACE_COUNT] = {};
-  int windows = 0, samples = 0, labelled = 0;
+  int windows = 0, samples = 0, labelled = 0, no_pwm = 0, pwm = 200;
   uint64_t t64 = 0;  // unwrapped sample time
   uint32_t last_t = 0;
   uint64_t next_window = 0;
   char line[256];
   if (dataset && header) {
-    std::printf("run,t,label,speed,servo");
+    std::printf("run,t,label,speed,servo,pwm,aug");
     for (int k = 0; k < ML_FEATURE_COUNT; ++k) std::printf(",%s", mlFeatureName(k));
     std::printf(",rule_pred\n");
   } else if (!dataset && !quiet) {
@@ -116,7 +117,10 @@ int main(int argc, char** argv) {
   }
   while (std::fgets(line, sizeof line, in)) {
     ImuSample s;
-    if (!parseRawLine(line, &s)) continue;
+    int line_pwm = -1;
+    if (!parseRawLine(line, &s, &line_pwm)) continue;
+    if (line_pwm >= 0) pwm = line_pwm;
+    else ++no_pwm;
     t64 = samples == 0 ? 0 : t64 + (uint32_t)(s.t_us - last_t);  // survives micros() wrap
     last_t = s.t_us;
     ++samples;
@@ -143,7 +147,7 @@ int main(int argc, char** argv) {
       int lab = (!event_class || f.peak_to_peak > event_p2p) ? (int)label : -1;
       labelled += lab >= 0;
       Classification rc = classify(f, th);
-      std::printf("%d,%.2f,%d,-1,-1", run, (double)t64 * 1e-6, lab);
+      std::printf("%d,%.2f,%d,-1,-1,%d,0", run, (double)t64 * 1e-6, lab, pwm);
       for (int k = 0; k < ML_FEATURE_COUNT; ++k) std::printf(",%.5g", (double)mf[k]);
       std::printf(",%d\n", rc.surface == SURFACE_UNKNOWN ? -1 : (int)rc.surface);
     } else if (!quiet) {
@@ -156,6 +160,7 @@ int main(int argc, char** argv) {
 
   std::fprintf(stderr, "\n%d samples, %d windows (1 s window every %lu ms), classifier: %s\n", samples, windows,
                (unsigned long)cfg::CONTROL_PERIOD_MS, use_ml ? "neural ensemble" : "rules");
+  if (no_pwm) std::fprintf(stderr, "note: %d samples had no PWM column; assumed PWM 200\n", no_pwm);
   if (dataset) {
     std::fprintf(stderr, "%d windows labelled %s (run %d)\n", labelled, surfaceName(label), run);
     return samples > 0 ? 0 : 1;

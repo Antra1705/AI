@@ -2,7 +2,7 @@
 //
 // The core logic only talks to these interfaces. On the Mac they are
 // implemented by fakes (host/fakes) so everything can be tested without the
-// cart. The real ESP32 implementations are added once the hardware is here.
+// cart. The real ESP32 implementations are in esp32/esp32_hal.*.
 #pragma once
 #include <stdint.h>
 

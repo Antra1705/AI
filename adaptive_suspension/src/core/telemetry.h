@@ -1,7 +1,7 @@
 // telemetry.h - text formats for the serial output and the dashboard.
 //
 // CSV lines (for the calibration / training tools) start with a letter and a comma:
-//   R,t_us,ax,ay,az,gx,gy,gz                                  raw IMU sample (100 Hz)
+//   R,t_us,ax,ay,az,gx,gy,gz,pwm                              raw IMU sample + drive PWM (100 Hz)
 //   F,t_ms,mean,jerk,p2p,rms,osc,gyro,surface,conf,servo      features + decision (10 Hz)
 //   J,{...}                                                   JSON snapshot for the dashboard (10 Hz)
 // Every other line is for humans; the tools ignore it.
@@ -13,7 +13,7 @@
 #include "maintenance.h"
 #include "types.h"
 
-#define RAW_CSV_HEADER "# R,t_us,ax,ay,az,gx,gy,gz"
+#define RAW_CSV_HEADER "# R,t_us,ax,ay,az,gx,gy,gz,pwm"
 #define FEATURE_CSV_HEADER \
   "# F,t_ms,accel_mean,jerk_max,peak_to_peak,accel_rms_dev,oscillations,gyro_std,surface,confidence,servo"
 
@@ -59,8 +59,9 @@ int formatStatus(char* buf, size_t n, const Snapshot& s);
 int formatJson(char* buf, size_t n, const Snapshot& s);
 int formatHealth(char* buf, size_t n, const Health& h, uint32_t uptime_ms, const char* reset_reason);
 int formatMaint(char* buf, size_t n, const MaintState& m);
-int formatRaw(char* buf, size_t n, const ImuSample& s);
+int formatRaw(char* buf, size_t n, const ImuSample& s, int pwm);
 int formatFeatures(char* buf, size_t n, uint32_t t_ms, const Features& f, const Classification& c, int servo);
 
-// Parses an "R,..." line. Returns false for any other line.
-bool parseRawLine(const char* line, ImuSample* out);
+// Parses an "R,..." line. Returns false for any other line. *pwm (optional) gets
+// the drive PWM, or -1 for older logs without that column.
+bool parseRawLine(const char* line, ImuSample* out, int* pwm = 0);

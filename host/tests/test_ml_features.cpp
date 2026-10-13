@@ -1,4 +1,5 @@
 #include <cmath>
+#include <string>
 
 #include "core/ml_features.h"
 #include "test.h"
@@ -78,4 +79,39 @@ TEST(ml_features_orientation_independent) {
   extractMlFeatures(level, fl);
   extractMlFeatures(tilted, ft);
   for (int i = 0; i < 14; ++i) CHECK_NEAR(fl[i], ft[i], 1e-3);
+  for (int i = 16; i < 21; ++i) CHECK_NEAR(fl[i], ft[i], 1e-3);
+}
+
+// A fresh impact in the last 0.25 s stands out in the short-window features even
+// when the 1 s features are dominated by earlier road.
+TEST(ml_features_short_window_sees_fresh_impact) {
+  ImuBuffer old_hit, new_hit;
+  fillZ(old_hit, [](int i) { return i == 20 ? G + 6.0f : G; });  // 0.8 s ago
+  fillZ(new_hit, [](int i) { return i == 95 ? G + 6.0f : G; });  // 50 ms ago
+  float fo[ML_FEATURE_COUNT], fn[ML_FEATURE_COUNT];
+  extractMlFeatures(old_hit, fo);
+  extractMlFeatures(new_hit, fn);
+  CHECK_NEAR(fo[1], fn[1], 1e-4);  // 1 s peak-to-peak: identical
+  CHECK(fn[17] > fo[17] + 3.0f);   // short-window peak-to-peak: only the fresh hit
+  CHECK(fn[20] > fo[20] + 3.0f);   // short-window jerk
+}
+
+
+// A periodic signal (corrugation) has a strong autocorrelation peak and a peaky
+// spectrum; random vibration has neither.
+TEST(ml_features_repetition_separates_periodic_from_random) {
+  ImuBuffer periodic, random;
+  unsigned seed = 3;
+  fillZ(periodic, [](int i) { return G + 1.0f * (float)std::sin(2 * PI * 8.0 * i * 0.01); });
+  fillZ(random, [&](int) {
+    seed = seed * 1103515245u + 12345u;
+    return G + ((float)((seed >> 8) & 0xFFFF) / 32768.0f - 1.0f);
+  });
+  float fp[ML_FEATURE_COUNT], fr[ML_FEATURE_COUNT];
+  extractMlFeatures(periodic, fp);
+  extractMlFeatures(random, fr);
+  CHECK(fp[21] > 0.8f);
+  CHECK(fr[21] < 0.4f);
+  CHECK(fp[22] < 0.2f);
+  CHECK(fr[22] > fp[22] + 0.2f);
 }

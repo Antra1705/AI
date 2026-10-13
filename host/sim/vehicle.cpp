@@ -17,7 +17,7 @@ static void makeWaves(std::mt19937& rng, std::vector<double>& k, int n, double f
   }
 }
 
-Track::Track(unsigned seed) : rng_(seed) {
+Track::Track(unsigned seed, double gravel_f_lo, double gravel_f_hi) : rng_(seed) {
   std::uniform_real_distribution<double> phase(0.0, 2.0 * PI);
   auto build = [&](std::vector<Wave>& out, int n, double f_lo, double f_hi, double rms, double slope) {
     std::vector<double> k;
@@ -36,29 +36,39 @@ Track::Track(unsigned seed) : rng_(seed) {
   build(micro_lat_, 8, 0.5, 15.0, 0.0002, 0.5);
   // Gravel: stones of 1.2-5 cm (20-80 cycles per metre), i.e. high-frequency
   // vibration well above the cart's ~4 Hz bounce resonance at normal speeds.
-  build(gravel_, 40, 20.0, 80.0, 1.0, 0.3);   // unit RMS, scaled per region
-  build(gravel_lat_, 30, 20.0, 80.0, 1.0, 0.3);
+  build(gravel_, 40, gravel_f_lo, gravel_f_hi, 1.0, 0.3);   // unit RMS, scaled per region
+  build(gravel_lat_, 30, gravel_f_lo, gravel_f_hi, 1.0, 0.3);
 }
 
 void Track::addSmooth(double len) { end_ += len; }
 
 void Track::addGravel(double len, double rms_m) {
-  features_.push_back(TrackFeature{TrackKind::GRAVEL, end_, end_ + len, rms_m});
+  features_.push_back(TrackFeature{TrackKind::GRAVEL, end_, end_ + len, rms_m, 0.0});
   end_ += len;
 }
 
 void Track::addBreaker(double height_m, double length_m) {
-  features_.push_back(TrackFeature{TrackKind::BREAKER, end_, end_ + length_m, height_m});
+  features_.push_back(TrackFeature{TrackKind::BREAKER, end_, end_ + length_m, height_m, 0.0});
   end_ += length_m;
 }
 
 void Track::addPothole(double depth_m, double length_m) {
-  features_.push_back(TrackFeature{TrackKind::POTHOLE, end_, end_ + length_m, depth_m});
+  features_.push_back(TrackFeature{TrackKind::POTHOLE, end_, end_ + length_m, depth_m, 0.0});
   end_ += length_m;
 }
 
+void Track::addCobble(double len, double stone_m, double height_m) {
+  features_.push_back(TrackFeature{TrackKind::COBBLE, end_, end_ + len, height_m, stone_m});
+  end_ += len;
+}
+
+void Track::addWashboard(double len, double wavelength_m, double amp_m) {
+  features_.push_back(TrackFeature{TrackKind::WASHBOARD, end_, end_ + len, amp_m, wavelength_m});
+  end_ += len;
+}
+
 void Track::addRumble(double len) {
-  features_.push_back(TrackFeature{TrackKind::RUMBLE, end_, end_ + len, 0.004});
+  features_.push_back(TrackFeature{TrackKind::RUMBLE, end_, end_ + len, 0.004, 0.0});
   end_ += len;
 }
 
@@ -66,7 +76,7 @@ void Track::placeReferenceBump(double from, double to, double bump_at, double he
   std::vector<TrackFeature> kept;
   for (const TrackFeature& f : features_)
     if (f.x1 < from || f.x0 > to) kept.push_back(f);
-  kept.push_back(TrackFeature{TrackKind::BREAKER, bump_at, bump_at + length_m, height_m});
+  kept.push_back(TrackFeature{TrackKind::BREAKER, bump_at, bump_at + length_m, height_m, 0.0});
   features_ = kept;
 }
 
@@ -98,6 +108,22 @@ double Track::elevation(double x) const {
       case TrackKind::POTHOLE:  // dip with ~1.5 cm edges (the wheel rounds off sharp corners)
         r -= f.size * edgeTaper(x, f.x0, f.x1, 0.015);
         break;
+      case TrackKind::COBBLE: {  // stones of fixed length, each at a pseudo-random height
+        double pos = (x - f.x0) / f.param;
+        long idx = (long)pos;
+        auto h = [&](long k) {
+          unsigned v = (unsigned)(k * 2654435761u) ^ 0x9E3779B9u;
+          v ^= v >> 13; v *= 0x5bd1e995u; v ^= v >> 15;
+          return f.size * ((double)(v % 1000) / 500.0 - 1.0);
+        };
+        double frac = pos - (double)idx, ramp = 0.15;  // rounded joints between stones
+        double hh = frac < ramp ? h(idx - 1) + (h(idx) - h(idx - 1)) * frac / ramp : h(idx);
+        r += edgeTaper(x, f.x0, f.x1, 0.05) * hh;
+        break;
+      }
+      case TrackKind::WASHBOARD:  // corrugation
+        r += edgeTaper(x, f.x0, f.x1, 0.1) * f.size * std::sin(2.0 * PI * (x - f.x0) / f.param);
+        break;
       case TrackKind::RUMBLE: {  // ridges every 6 cm, 2 cm wide
         double p = std::fmod(x - f.x0, 0.06);
         if (p < 0.02) r += f.size * edgeTaper(x, f.x0, f.x1, 0.05) * 0.5 * (1.0 - std::cos(2.0 * PI * p / 0.02));
@@ -122,6 +148,7 @@ int Track::baseAt(double x) const {
     if (x < f.x0 || x > f.x1) continue;
     if (f.kind == TrackKind::GRAVEL) return SURFACE_GRAVEL;
     if (f.kind == TrackKind::RUMBLE) return -1;
+    if (f.kind == TrackKind::COBBLE || f.kind == TrackKind::WASHBOARD) return -2;
   }
   return SURFACE_SMOOTH;
 }
@@ -248,7 +275,7 @@ void Vehicle::step(double dt, int pwm, bool braked, int servo_cmd) {
   truth_.roll = std::atan2(Rs[2][1], Rs[2][2]);
 
   double wheel_hz = v / (2 * PI * 0.033);
-  double vib = 0.05 * (v / 0.5) * (std::sin(2 * PI * wheel_hz * t_) + 0.5 * std::sin(4 * PI * wheel_hz * t_ + 1.0));
+  double vib = 0.05 * p_.vib_scale * (v / 0.5) * (std::sin(2 * PI * wheel_hz * t_) + 0.5 * std::sin(4 * PI * wheel_hz * t_ + 1.0));
   double f_world[3] = {truth_.a_long + 0.3 * vib, 0.0, zdd + G + vib};
   double f_sensor[3];
   mulTv(Rs, f_world, f_sensor);

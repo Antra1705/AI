@@ -12,8 +12,8 @@ re-derived from recordings once the hardware exists.
 ## 1. Pipeline
 
 ```
-MPU6050 (100 Hz) ──► 1 s rolling buffer ──► 16 features ──► int8 neural ensemble ──► class probabilities
-      │                                         (10 Hz)        (+ uncertainty)          + confidence, disagreement, novelty
+MPU6050 (100 Hz) ──► 1 s rolling buffer ──► 23 features ──► int8 neural ensemble ──► class probabilities
+      │                                       (every 30 ms)    (+ uncertainty)          + confidence, disagreement, novelty
       │                                                                                       │
       ├──► impact reflex (one-sample jerk) ──────────────────────────────┐                    ▼
       │                                                                 │     confidence → damping curve ──► actuator shaper ──► servo
@@ -35,8 +35,10 @@ simulator now and on the ESP32 later.
 ## 2. Road-surface classification model
 
 ### Features (`ml_features.cpp`)
-They are computed over the last 1 s (100 samples) of d = |a| − mean|a|. Using the
-acceleration magnitude makes them independent of how the sensor is mounted.
+Features 0–15 are computed over the last 1 s (100 samples) of d = |a| − mean|a|.
+Features 16–20 use only the last 0.25 s, so a fresh impact is not diluted by the
+second of road before it. Using the acceleration magnitude makes all of them
+independent of how the sensor is mounted.
 
 | # | Feature | Captures |
 |---|---|---|
@@ -46,32 +48,101 @@ acceleration magnitude makes them independent of how the sensor is mounted.
 | 7–8 | crest factor, log kurtosis | impulsive vs. steady |
 | 9–13 | **FFT band energies** 1–2, 3–5, 6–10, 11–20, 21–49 Hz | frequency signature (Hann-windowed DFT) |
 | 14–15 | log gyro std, largest gyro rise | rotation from uneven ground |
+| 16–20 | last 0.25 s: log RMS, peak-to-peak, rise, drop, max jerk | a fresh impact, seen immediately |
+| 21 | autocorrelation peak (lags 30–400 ms) | how *regular* the vibration is: a rumble strip or washboard repeats, gravel does not |
+| 22 | spectral flatness | broadband noise (gravel) vs. a few strong tones (repeating ridges) |
+
+A sixth extra input, the drive speed (PWM), was tested and dropped. It gave no gain
+on a different cart (below), and a cart pushed by hand would report speed 0.
+
+### Training data: built for robustness
+The biggest risk is the jump from simulation to the real cart. The training set
+therefore uses **domain randomisation** (`sim dataset --domain robust --augment`).
+Every drive gets a random cart and road:
+- weight ×0.7–1.4, springs ×0.8–1.25, dampers ×0.8–1.2, shock wear 50–100%;
+- sensor noise, bias and digital filter setting (10/21/44 Hz), mounting tilt up to 8°, drivetrain vibration;
+- speeds 0.12–0.65 m/s, gravel stone sizes, gravel roughness 0.8–3.5 mm, bumps and potholes 0.8–3.2 cm.
+
+On top of that, about half the windows get an **augmented copy**: the vibration and
+rotation are scaled ×0.7–1.35 and extra sensor noise is added. Augmented copies are
+used for training only, never for validation or testing.
+
+The training drives also contain **"other" road** (`--other`): cobblestones and
+washboard ripples, labelled as their own category. The model is not taught to name
+them. It is taught to be *unsure* on them (outlier exposure, below), so that road it
+has never seen is more likely to be flagged. The rumble strip used to test this is
+never in the training data.
+
+Robustness is measured on a **"different cart"** that no model trains on
+(`--domain shifted`): 35–50% heavier, softer springs, a noisier sensor on another
+filter setting, mounted 10° crooked, faster, bigger stones and taller bumps. Several
+of these are outside the training ranges.
 
 ### Model (`ml_model.cpp`, trained by `tools/train_torch.py` or `host/train`)
 Two independently written trainers produce the same artefacts:
 - `tools/train_torch.py` (PyTorch) is the readable reference and the source of the deployed model.
 - `host/train` (dependency-free C++) is the alternative when no Python packages are available.
 
-Both reach the same accuracy (99.3%, macro-F1 0.970 vs 0.968), and the same parity
-test checks both exports against the on-device int8 code. Two separate
+Both reach the same accuracy on the same data (99.0% for both, macro-F1 0.954 for
+both on the robust test runs; unseen-surface AUROC 0.871 vs 0.863), and the same parity test checks both exports against
+the on-device int8 code. Two separate
 implementations agreeing is an independent check of the quantization pipeline.
 
-- 5 multilayer perceptrons, 16 → 16 → 16 → 4, ReLU.
+- 5 multilayer perceptrons, 23 → 16 → 16 → 4, ReLU.
 - Each is trained on a bootstrap resample with class-weighted cross-entropy (Adam, 30 epochs).
+- **Outlier exposure:** on "other" road windows the target is the uniform distribution (equal probability on all four surfaces), weight 0.5 (`--oe`). This teaches the members to spread their answer, and to disagree, on unfamiliar road.
 - **Quantization-aware training (#6):** after float training, the int8 input range of each layer is calibrated (99.99th percentile of |activation|). Then 12 epochs fine-tune with weights and activations rounded to int8 in the forward pass, and gradients pass straight through (straight-through estimator) except where values were clipped.
-- **Deployed arithmetic:** int8 weights, int8 activations, int32 accumulation, one float rescale per neuron. Weights total 2,880 bytes.
+- **Deployed arithmetic:** int8 weights, int8 activations, int32 accumulation, one float rescale per neuron. Weights total 3,440 bytes; the novelty model adds 8.5 kB of floats. The classifier runs every 30 ms.
 - A parity test (`test_ml_model.cpp`) checks that the on-device int8 code reproduces the trainer's own fake-quantized forward pass (PyTorch autograd for the deployed model) on real test windows.
 
-### Results (test runs never seen in training)
-| Model | Accuracy | Macro-F1 |
-|---|---|---|
-| Rule-based, thresholds tuned on the same data | 83.9% | 0.725 |
-| 1 MLP float32 | 99.2% | 0.961 |
-| 1 MLP int8, post-training quantization | 99.2% | 0.963 |
-| 1 MLP int8, QAT | 99.2% | 0.962 |
-| **Ensemble int8 QAT (deployed)** | **99.3%** | **0.970** |
+### Results: what made it better (ablation)
+All five models are 5-member int8 QAT ensembles. Both test sets are separate
+datasets that none of them trained on.
 
-In closed loop on unseen tracks, the classifier is correct on 98.7% of windows.
+| Model | Normal carts: acc. / F1 | Different cart: acc. / F1 | Different cart: breakers caught | Different cart: flagged unsure |
+|---|---|---|---|---|
+| A. Previous: nominal data, 16 features | 99.4% / 0.973 | 94.9% / 0.840 | 59% | 20.2% |
+| B. + randomised data and augmentation | 99.4% / 0.977 | 97.0% / 0.908 | 78% | 8.5% |
+| C. + last-0.25 s features | 99.7% / 0.985 | 97.7% / 0.918 | 76% | 8.7% |
+| D. + drive speed input (dropped) | 99.7% / 0.985 | 97.6% / 0.911 | 72% | 9.3% |
+| **E. C + repetition features + outlier exposure (deployed)** | **99.7% / 0.983** | **97.9% / 0.928** | **82%** | 7.4% |
+| Rule-based, for reference | 84.1% / 0.754 | 38.9% / 0.455 | 26% | – |
+
+- **Randomised training is the big win for robustness:** different-cart F1 0.840 → 0.908, and caught speed breakers 59% → 78%.
+- **The short-window features** add accuracy on both test sets, and above all speed (see "Detection speed" below).
+- **The speed input** adds nothing, so it was dropped.
+- **Repetition features and outlier exposure** were added for unseen-surface detection (section 3); they also help a little on the different cart.
+- **The fixed rules collapse on the different cart** (38.9%): hand-set thresholds don't transfer, which is the strongest argument for the learned model.
+
+On its own (harder, randomised) test runs the deployed model scores 99.0%
+(macro-F1 0.954). In closed loop on unseen nominal tracks it is correct on 99.9% of
+windows; on the different cart, 97.1%.
+
+**Missed breakers are not missed impacts.** Most of the different cart's "missed"
+breakers (82% recall) are called *pothole*, and both get full stiffness. Counting a
+breaker or pothole recognised as either one, **impact recall is 99.7%** on both the
+normal and the different carts (rules: 93.0% / 85.0%).
+
+| Same model, offline, randomised test runs | Accuracy | Macro-F1 |
+|---|---|---|
+| Rule-based | 77.0% | 0.635 |
+| 1 MLP float32 | 99.0% | 0.953 |
+| 1 MLP int8, post-training quantization | 98.9% | 0.952 |
+| 1 MLP int8, QAT | 99.0% | 0.953 |
+| **Ensemble int8 QAT (deployed)** | **99.0%** | **0.954** |
+
+### Detection speed
+Time from the front wheel reaching a breaker or pothole to the classifier putting
+more than 50% on "impact" (closed loop, 73 events):
+
+| Version | Average | 90th percentile | Servo physically stiff (≥140°) |
+|---|---|---|---|
+| Previous (1 s features, every 100 ms) | 89 ms | 129 ms | 195 ms |
+| New features, still every 100 ms | 67 ms | 107 ms | 173 ms |
+| **New features, every 30 ms (deployed)** | **27 ms** | **37 ms** | **131 ms** |
+
+To avoid extra servo wear from the faster updates, only *stiffening* reacts at the
+30 ms rate; softening still updates at 10 Hz. Servo wear is covered in section 4.
 
 **Honest note on QAT:** at this model size, plain post-training quantization already
 loses nothing, so QAT gives no measurable gain here. It is kept because it costs
@@ -87,28 +158,50 @@ Two complementary estimates, computed in `mlPredict`:
    - p = mean of softmax(z_m / T) over the 5 members.
    - T is fitted on the validation runs (temperature scaling).
    - Mutual information MI = H(p) − mean_m H(p_m) measures how much the members disagree.
-2. **Data novelty:** class-conditional Gaussian with shared covariance, fitted on the training features.
-   - novelty = min over classes of the squared Mahalanobis distance.
+2. **Data novelty:** a Gaussian per surface, **each with its own covariance**, fitted on the training features.
+   - novelty = min over surfaces of the squared Mahalanobis distance.
    - It is high when the input looks like none of the trained surfaces.
+   - A separate covariance per surface fits each surface's own shape much more tightly than one shared covariance (gravel varies in completely different directions from a pothole). Cost: 4 × 23 × 23 floats = 8.5 kB of flash instead of 2 kB.
 
-A window is *uncertain* when confidence < 0.975, MI > 0.0111 or novelty > 62.9. These
+A window is *uncertain* when confidence < 0.824, MI > 0.0533 or novelty > 88.2. These
 thresholds come from validation data (the 2.5th / 97.5th / 99th percentiles of
 correct windows). Uncertainty is not only a flag: it feeds the damping curve
 continuously (section 4) and the fuzzy speed controller (section 6).
 
 | Result (offline test set) | Value |
 |---|---|
-| Coverage (windows accepted) | 95.0% |
-| Accuracy on accepted / flagged windows | 99.9% / 88.3% |
-| Transition windows flagged | 50.0% |
-| Unseen surface (rumble strip) flagged | 11.2% (single model + confidence gate: 6.7%) |
-| Unseen-surface detection AUROC, deployed rule / single model | 0.78 / 0.74 |
+| Coverage (windows accepted) | 95.5% |
+| Accuracy on accepted / flagged windows | 99.8% / 82.0% |
+| Transition windows flagged | 49.3% |
+| Different cart: windows flagged | 7.4% (first model: 20.2%) |
+| Unseen surface (rumble strip) flagged | 7.6% |
+| Unseen-surface detection AUROC, deployed rule / single model | 0.87 / 0.63 |
 
-**Limitation:** detection of a genuinely new surface is weak. In closed loop the
-rumble strip is mostly treated as gravel, so the suspension goes soft, which is a
-benign response for that kind of vibration. The ensemble and novelty model are
-better than the simplified single-model gate (AUROC 0.78 vs 0.74), but the gap is
-small and this is not a guarantee of detecting every new surface.
+### Detecting road it has never seen
+Robust training had made this worse: after seeing a wide range of carts and roads,
+a rumble strip no longer looked unusual (AUROC 0.78 → 0.60). Three changes, each
+measured on the same unseen rumble strip in three test sets:
+
+| Version | Own test runs | Normal carts | Different cart |
+|---|---|---|---|
+| Robust model, 21 features, shared covariance | 0.60 | 0.66 | 0.75 |
+| + repetition features (autocorrelation, spectral flatness) | 0.78 | 0.82 | 0.82 |
+| + outlier exposure on cobbles / washboard | 0.80 | 0.84 | 0.83 |
+| **+ per-surface covariance (deployed)** | **0.87** | **0.90** | **0.88** |
+
+(AUROC: 0.5 = no better than chance, 1.0 = perfect.) None of the three cost any
+classification accuracy (section 2, row E).
+
+**Still limited:** the flag threshold is set so only 1% of normal windows trip the
+novelty check, and at that setting only 6–8% of rumble-strip windows are flagged
+offline (1.3% on the different cart, 0% in the closed-loop test). The model now
+*ranks* unfamiliar road as more unusual, but most of it still looks enough like gravel
+to pass. In closed loop the rumble strip gets soft, gravel-like damping (about 50°),
+which is the comfortable choice for that kind of vibration, so the practical risk is
+low. Lowering the threshold would flag more of it, but also more normal road, and every
+flag moves the damping toward the middle setting. The accepted/flagged split
+(99.8% vs 82.0% accuracy) shows the uncertainty signals still separate right from
+wrong answers well.
 
 ---
 
@@ -123,7 +216,7 @@ c_eff  = confidence · 2^(−MI / MI_thr) · min(1, nov_thr / novelty)   trust, 
 g      = smoothstep((c_eff − 0.55) / (0.90 − 0.55))          how much the classification is trusted
 s_base = S_safe + g · (s_exp − S_safe)                       blend toward a safe middle setting (S_safe = 0.43, 90°)
 s_risk = 0.9 · (p(breaker) + p(pothole))                     protective floor: stiffen even when unsure
-s_sky  = 0.15 · min(|v_z| / 0.05 m/s, 1)                     extra damping when the EKF sees the body bounce
+s_sky  = 0.15 · (1 − p(gravel)) · min(|v_z| / 0.05 m/s, 1)   extra damping when the EKF sees the body bounce, except on gravel
 s      = clamp(max(s_base, s_risk) + s_sky, 0, 1)
 ```
 
@@ -142,11 +235,19 @@ locked at six settings on each surface, and comfort and protection were measured
 
 This contradicts the original SRA mapping, which put gravel at a medium 110°.
 
+**Why the body-motion term is switched off on gravel.** On gravel the body vibrates
+all the time, so the skyhook term kept adding stiffness, which is exactly what makes
+gravel worse (table above), and it kept the servo moving. Weighting it by
+(1 − p(gravel)) cut servo movement by 34% and gravel vibration by 13% on the normal
+carts, with no change in protection. Switching it off only halfway was worse than
+either extreme.
+
 **Actuator shaping, tuned to the servo's response time** (`ActuatorShaper`):
 - stiffening uses the MG90S's full loaded slew rate (300 °/s), so protection is never held back;
 - softening is limited to 60 °/s, so a brief misclassification can't pump the suspension;
-- a 2° deadband suppresses jitter and wear;
-- the **impact reflex** jumps straight to full stiffness on one very sharp sample (jerk > 3000 m/s³, set above gravel's 99th percentile), without waiting for the 10 Hz classifier.
+- a 3° deadband suppresses jitter and wear (2.5% less servo movement than 2°, no measurable effect on the ride);
+- the **impact reflex** jumps straight to full stiffness on one very sharp sample (jerk > 3000 m/s³, set above gravel's 99th percentile), without waiting for the classifier;
+- stiffening follows the classifier every 30 ms; softening only every 100 ms, so the servo does not chase small changes.
 
 ### Closed-loop evidence (8 unseen tracks, same cars and speed for every strategy)
 Figure: `docs/figures/ride_comparison.png`.
@@ -155,18 +256,68 @@ Figure: `docs/figures/ride_comparison.png`.
 |---|---|---|---|---|---|
 | Passive soft (45°) | **1.42** | 47.7 | 8.68 | 1 | – |
 | Passive stiff (150°) | 7.32 | **10.8** | **1.05** | 1 | – |
-| SRA: rules + fixed angles | 5.18 | 31.8 | 2.79 | 80 | 0 |
-| Neural + fixed angles | 4.98 | 32.6 | 3.33 | 63 | **16** |
-| **Neural + graded curve** | 2.11 | 13.5 | 1.38 | 63 | **0** |
+| SRA: rules + fixed angles | 5.19 | 33.3 | 2.90 | 80 | 0 |
+| Neural + fixed angles | 4.98 | 34.1 | 3.10 | 64 | **2** |
+| **Neural + graded curve** | 1.83 | 12.6 | 1.32 | **43** | **0** |
 
-- **Against the SRA design:** 59% less gravel vibration, 57% lower peak jolt at breakers and potholes, 51% fewer bottom-outs, 22% less servo movement.
+- **Against the SRA design:** 65% less gravel vibration, 62% lower peak jolt at breakers and potholes, 54% fewer bottom-outs, 47% less servo movement.
 - **Against either passive setting:** no single fixed setting wins on both comfort and protection. The adaptive system gets close to the best of each: near-stiff protection with much better gravel comfort than stiff.
-- **Neural classifier on fixed angles missed 16 potholes.** It falls back to neutral whenever it is unsure. The curve's protective floor is what removes those misses, which is direct evidence for the graded mapping.
+- **Neural classifier on fixed angles missed 2 potholes** (16 with the first model). It falls back to neutral whenever it is unsure. The curve's protective floor is what removes those misses, which is direct evidence for the graded mapping.
+
+**On the different cart** (closed loop, same comparison):
+
+| Strategy | Gravel RMS | Event peak | Bottom-outs / event | Classifier correct |
+|---|---|---|---|---|
+| Passive stiff (150°) | 6.30 | **28.9** | **4.48** | – |
+| SRA: rules + fixed angles | 4.60 | 36.2 | 5.26 | 87.7% |
+| **Neural + graded curve** | **3.31** | 32.9 | 5.79 | **97.1%** |
+
+The classifier transfers well (97.1% correct), and comfort stays clearly better,
+and the servo moves no more than in the SRA design (43 °/m each).
+Bottom-outs in total are slightly *worse* than the SRA design (5.79 vs 5.26 per
+event), but splitting them by where they happen shows that protection is not the
+problem:
+
+| Bottom-outs per event, different cart | At breakers/potholes | Elsewhere (on gravel) |
+|---|---|---|
+| Passive stiff (150°) | 4.12 | 0.36 |
+| SRA: rules + fixed angles | 4.68 | 0.58 |
+| **Neural + graded curve** | **4.26** | 1.53 |
+
+At breakers and potholes the deployed design is better than the SRA design. The
+extra ones are on gravel. This cart is heavier, with softer springs and partly worn
+shocks, and on gravel the fully soft setting occasionally uses up its travel and touches
+the bump stop. These touches are light: the body acceleration when they happen (median
+4.2 m/s²) is below what ordinary gravel vibration reaches (7.8 m/s² at the 99th
+percentile), and gravel comfort is still 28% better than the SRA design. On the
+nominal cart there are none.
+
+*Tried and not adopted:*
+- A gravel stiffness margin. 0.1 made gravel 21% rougher on the normal cart and did
+  not reduce bottom-outs. 0.2 cut them by only 3%, at 45% more vibration.
+- An adaptive version that stiffens when it feels bump-stop hits. The IMU cannot tell
+  these light touches from normal gravel vibration, so there is nothing to adapt on.
+
+The `sim tune` targets were measured with healthy shocks; repeat it on the real cart,
+including with worn shocks, before changing them.
+
+**Tried and removed: automatic on-cart tuning.** A `tune` command was built that
+drove the cart over its own road, tried several smooth-road settings and kept the
+one with the fewest bottom-outs (estimated from the IMU). It did not improve the
+different cart, and on the normal cart the results were mixed, so it was removed. Two
+reasons were found:
+- The smooth-road setting is also the cart's "readiness" when a bump arrives
+  unannounced, so tuning it for comfort alone trades away protection.
+- The IMU bottom-out estimate was confused by ordinary hard hits at full stiffness.
+
+Retuning the targets is better done on the bench with the real cart, following
+`sim tune`.
 
 **Limitation:** the system reacts; it cannot see a pothole before the wheel hits
 it. The front wheel's impact is absorbed at whatever setting the suspension was
 in. Average time to physically reach ≥140° after the front wheel hits is about
-200 ms, which is mostly servo travel. The rear wheel is the one that benefits.
+131 ms: about 27 ms to detect, the rest servo travel. The rear wheel is the one that
+benefits.
 
 ---
 
@@ -264,8 +415,7 @@ why the drift detectors are needed.
 
 ## 9. What still needs the hardware
 
-- ESP32 drivers (MPU6050, HC-SR04, servo, L298N, NVS storage, watchdog), the pin map and the Arduino sketch.
-- WiFi serving of the dashboard: the same page, with `/events` and `/cmd` on the ESP32.
+- Running the ESP32 firmware on the cart for the first time. The drivers (MPU-6050, HC-SR04, servo, L298N, NVS storage, watchdog), the pin map, the Arduino sketch and the WiFi dashboard are written for the agreed wiring but untested on hardware (`docs/HARDWARE_BRINGUP.md`).
 - Real recordings, then `replay --label`, then `train`, `calibrate.py` and `sim tune` repeated against bench measurements.
 - Measuring top speed, braking and servo slew, then re-checking obstacle stopping distance.
 - Accelerometer offset calibration.

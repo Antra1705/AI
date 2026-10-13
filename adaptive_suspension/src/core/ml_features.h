@@ -18,10 +18,19 @@
 //        (Hann-windowed DFT of d; bin k = k Hz at 100 samples / 1 s)
 //  14 log std of |gyro|
 //  15 log largest |gyro| rise above its mean
+// Last 0.25 s only (25 samples), so a fresh impact is not diluted by the
+// preceding second of road (faster detection):
+//  16 log RMS of d        17 log peak-to-peak     18 log largest rise
+//  19 log largest drop    20 log max jerk
+// Repetition (a corrugated or ridged road is periodic, gravel is random):
+//  21 largest autocorrelation of d at lags 3-40 samples (0..1)
+//  22 spectral flatness of d over 1-49 Hz (geometric / arithmetic mean power; 1 = noise-like)
+// (A drive-speed input was tested and dropped: no gain on a different cart, and a
+// cart pushed by hand would report speed 0. See docs/ALGORITHMS.md.)
 #pragma once
 #include "imu_buffer.h"
 
-enum { ML_FEATURE_COUNT = 16 };
+enum { ML_FEATURE_COUNT = 23, ML_SHORT_SAMPLES = 25 };
 
 // Fills out[ML_FEATURE_COUNT]. Needs a full buffer; returns false otherwise.
 bool extractMlFeatures(const ImuBuffer& buf, float out[ML_FEATURE_COUNT]);

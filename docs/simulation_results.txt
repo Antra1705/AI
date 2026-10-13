@@ -2,17 +2,17 @@
 ================================================================
 1. Ride and damping
 ================================================================
-Closed-loop ride comparison: 8 random tracks x 40 m (unseen in training), same cars,
-same speed (PWM 200) for every strategy so only the damping differs. Lower is better
-for every column except accuracy.
+Closed-loop ride comparison (nominal carts and roads): 8 random tracks x 40 m (unseen in
+training), same cars, same speed (PWM 200) for every strategy so only the damping differs.
+Classifier runs every 30 ms. Lower is better for every column except accuracy.
 
 Strategy                             smooth   gravel     event   bottom     servo    pothole   class.
                                    RMS m/s2 RMS m/s2 peak m/s2 outs/evt     deg/m   react ms     acc.
 Passive soft (servo fixed 45)         0.178    1.419     47.74     8.68       1.0          -        -
 Passive stiff (servo fixed 150)       0.055    7.324     10.82     1.05       1.4          -        -
-SRA: rules + fixed angles             0.070    5.177     31.82     2.79      80.4 343 (0 miss)    93.3%
-Neural + fixed angles                 0.072    4.981     32.60     3.33      63.4 371 (16 miss)    97.6%
-Neural + graded curve (deployed)      0.057    2.109     13.53     1.38      62.9 195 (0 miss)    98.7%
+SRA: rules + fixed angles             0.070    5.186     33.26     2.90      80.4 351 (0 miss)    93.9%
+Neural + fixed angles                 0.073    4.977     34.15     3.10      64.3 383 (2 miss)    98.9%
+Neural + graded curve (deployed)      0.057    1.828     12.63     1.32      43.0 131 (0 miss)    99.9%
 
 smooth/gravel RMS: body vertical acceleration away from events (comfort).
 event peak: largest body acceleration within 1 s of a breaker/pothole (protection).
@@ -21,7 +21,21 @@ servo deg/m: total servo movement per metre driven (actuator wear).
 pothole react: front wheel reaches the pothole -> servo physically at >= 140 deg
                (miss = not within 0.5 s).
 
-Deployed classifier in closed loop: 98.7% correct, 4.3% of windows flagged uncertain.
+Where the bottom-outs happen (per breaker/pothole): at the event itself (within 1.5 s) /
+elsewhere (on gravel):
+  Passive soft (servo fixed 45)       8.68 at events,  0.00 elsewhere
+  Passive stiff (servo fixed 150)     1.05 at events,  0.00 elsewhere
+  SRA: rules + fixed angles           2.90 at events,  0.00 elsewhere
+  Neural + fixed angles               3.10 at events,  0.00 elsewhere
+  Neural + graded curve (deployed)    1.32 at events,  0.00 elsewhere
+
+Impact detection (front wheel reaches a breaker or pothole -> classifier puts > 50% on
+breaker + pothole; miss = not within 0.5 s):
+  SRA: rules + fixed angles          avg   36 ms, median   33 ms, 90th pct   59 ms, 0 missed of 73
+  Neural + fixed angles              avg   38 ms, median   35 ms, 90th pct   55 ms, 0 missed of 73
+  Neural + graded curve (deployed)   avg   27 ms, median   27 ms, 90th pct   37 ms, 0 missed of 73
+
+Deployed classifier in closed loop: 99.9% correct, 1.4% of windows flagged uncertain.
 
 ================================================================
 2. Obstacle speed control
@@ -41,8 +55,8 @@ Type-1 fuzzy             0.70 m/s        16.2           0      3.0/s2          8
 Interval Type-2 fuzzy    0.70 m/s        12.6           1      3.0/s2         10.0        6.3
 
 SRA steps (200/127/0)    0.90 m/s        -3.4          20      3.0/s2          7.0        4.7  CONTACT
-Type-1 fuzzy             0.90 m/s        14.3           0      3.0/s2          8.1        5.1
-Interval Type-2 fuzzy    0.90 m/s        15.6           0      3.0/s2         11.9        5.0
+Type-1 fuzzy             0.90 m/s        14.7           0      3.0/s2          8.1        5.1
+Interval Type-2 fuzzy    0.90 m/s        15.1           0      3.0/s2         12.7        5.0
 
 The hard 10 cm emergency stop stays active in every mode; fuzzy control only shapes the
 approach. Real braking and top speed must be measured on the cart (see BRD R-3).
@@ -68,20 +82,20 @@ Attitude estimation over 5 random drives (sensor mounted 5 deg crooked, gyro and
 accelerometer bias, vibration). RMS error of roll+pitch vs. the true attitude, degrees.
 
 Estimator                                     smooth road   rough road
-EKF, noise follows classifier (deployed)            0.530        0.501
-EKF, fixed noise tuned for smooth road              0.507        0.497
-EKF, fixed noise tuned for rough road               0.508        0.499
-Accelerometer tilt only (no filter)                 3.932        4.835
+EKF, noise follows classifier (deployed)            0.523        0.503
+EKF, fixed noise tuned for smooth road              0.504        0.499
+EKF, fixed noise tuned for rough road               0.505        0.501
+Accelerometer tilt only (no filter)                 0.675        4.711
 Vertical body velocity (used by the damping curve): RMS error 0.015 m/s.
 
 Same drives with a perfectly calibrated accelerometer (no bias), so only vibration
 and acceleration errors remain:
 
 Estimator                                     smooth road   rough road
-EKF, noise follows classifier (deployed)            0.287        0.229
-EKF, fixed noise tuned for smooth road              0.232        0.198
-EKF, fixed noise tuned for rough road               0.231        0.209
-Accelerometer tilt only (no filter)                 3.908        5.222
+EKF, noise follows classifier (deployed)            0.271        0.226
+EKF, fixed noise tuned for smooth road              0.226        0.201
+EKF, fixed noise tuned for rough road               0.225        0.211
+Accelerometer tilt only (no filter)                 1.295        5.167
 Vertical body velocity (used by the damping curve): RMS error 0.013 m/s.
 
 With bias, every filter sits near the ~0.5 deg floor that an uncalibrated accelerometer
@@ -105,7 +119,7 @@ Wear: healthy for 10 days, then damping falls 2% per day (shock oil leaking).
     9     100%   0.1207    HEALTHY
    10     100%   0.1151    HEALTHY
    11      98%   0.1065    HEALTHY
-   12      96%   0.1110    HEALTHY
+   12      96%   0.1111    HEALTHY
    15      90%   0.1039    HEALTHY
    18      84%   0.0957    HEALTHY
    21      78%   0.0894    HEALTHY
@@ -137,13 +151,51 @@ Healthy shocks for 40 days: 0 false alarms.
 Unseen surface: rumble strips (never in the training data), 5 drives.
 
                                     flagged   mean servo     mean PWM
-Known surfaces                         1.7%         91.5        189.1
-Rumble strip (unseen)                  0.0%         49.7        165.0
+Known surfaces                         0.7%         89.9        189.0
+Rumble strip (unseen)                  0.0%         50.5        165.0
 
 Rule-based classifier on the rumble strip: calls it gravel 100% of the time and has no
 uncertainty signal at all.
-Ensemble: flags 0.0% of rumble-strip windows vs 1.7% on known surfaces - it does NOT reliably notice this new surface;
+Ensemble: flags 0.0% of rumble-strip windows vs 0.7% on known surfaces - it does NOT reliably notice this new surface;
 it mostly treats it like gravel. See docs/model_report.md for the offline numbers.
+
+================================================================
+1b. Ride and damping on a different cart (domain: shifted)
+================================================================
+Closed-loop ride comparison (shifted carts and roads): 8 random tracks x 40 m (unseen in
+training), same cars, same speed (PWM 200) for every strategy so only the damping differs.
+Classifier runs every 30 ms. Lower is better for every column except accuracy.
+
+Strategy                             smooth   gravel     event   bottom     servo    pothole   class.
+                                   RMS m/s2 RMS m/s2 peak m/s2 outs/evt     deg/m   react ms     acc.
+Passive soft (servo fixed 45)         2.817   25.584    100.62    21.51       1.0          -        -
+Passive stiff (servo fixed 150)       0.073    6.301     28.94     4.48       1.4          -        -
+SRA: rules + fixed angles             0.062    4.603     36.22     5.26      42.9 134 (0 miss)    87.7%
+Neural + fixed angles                 0.066    4.321     60.25     6.89      55.8 328 (1 miss)    95.1%
+Neural + graded curve (deployed)      0.067    3.309     32.92     5.79      43.1 121 (0 miss)    97.1%
+
+smooth/gravel RMS: body vertical acceleration away from events (comfort).
+event peak: largest body acceleration within 1 s of a breaker/pothole (protection).
+bottom outs/evt: suspension hitting its travel limit per breaker/pothole.
+servo deg/m: total servo movement per metre driven (actuator wear).
+pothole react: front wheel reaches the pothole -> servo physically at >= 140 deg
+               (miss = not within 0.5 s).
+
+Where the bottom-outs happen (per breaker/pothole): at the event itself (within 1.5 s) /
+elsewhere (on gravel):
+  Passive soft (servo fixed 45)      15.03 at events,  6.48 elsewhere
+  Passive stiff (servo fixed 150)     4.12 at events,  0.36 elsewhere
+  SRA: rules + fixed angles           4.68 at events,  0.58 elsewhere
+  Neural + fixed angles               6.27 at events,  0.62 elsewhere
+  Neural + graded curve (deployed)    4.26 at events,  1.53 elsewhere
+
+Impact detection (front wheel reaches a breaker or pothole -> classifier puts > 50% on
+breaker + pothole; miss = not within 0.5 s):
+  SRA: rules + fixed angles          avg   20 ms, median   18 ms, 90th pct   34 ms, 0 missed of 73
+  Neural + fixed angles              avg   30 ms, median   31 ms, 90th pct   43 ms, 0 missed of 73
+  Neural + graded curve (deployed)   avg   28 ms, median   29 ms, 90th pct   42 ms, 0 missed of 73
+
+Deployed classifier in closed loop: 97.1% correct, 7.4% of windows flagged uncertain.
 
 ================================================================
 0. Damping characterisation (sim tune) - source of the curve targets

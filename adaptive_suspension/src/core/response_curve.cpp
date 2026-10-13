@@ -30,7 +30,10 @@ CurveOutput responseCurve(const CurveInput& in, const CurveThresholds& th) {
   o.gate = smoothstep01((o.c_eff - cfg::CURVE_C_LOW) / (cfg::CURVE_C_HIGH - cfg::CURVE_C_LOW));
   const float s_base = cfg::STIFF_SAFE + o.gate * (o.s_exp - cfg::STIFF_SAFE);
   o.s_risk = in.valid ? cfg::CURVE_RISK_GAIN * (in.p[2] + in.p[3]) : 0.0f;
-  o.s_sky = cfg::CURVE_SKY_GAIN * clampf(fabsf(in.vz) / cfg::CURVE_SKY_VREF, 0.0f, 1.0f);
+  // Body-motion damping, except on gravel: there the body vibrates all the time and
+  // extra stiffness only transmits more of it (measured: worse comfort, more servo wear).
+  const float not_gravel = in.valid ? 1.0f - cfg::CURVE_SKY_GRAVEL_GATE * in.p[1] : 1.0f;
+  o.s_sky = cfg::CURVE_SKY_GAIN * not_gravel * clampf(fabsf(in.vz) / cfg::CURVE_SKY_VREF, 0.0f, 1.0f);
   o.s = clampf((s_base > o.s_risk ? s_base : o.s_risk) + o.s_sky, 0.0f, 1.0f);
   o.angle = stiffnessToAngle(o.s);
   return o;

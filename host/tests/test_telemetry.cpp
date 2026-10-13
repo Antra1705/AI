@@ -6,9 +6,11 @@
 TEST(raw_line_round_trip) {
   ImuSample s = {123456789u, 0.123f, -1.5f, 9.81f, 0.0012f, -0.25f, 3.1416f};
   char buf[128];
-  formatRaw(buf, sizeof buf, s);
+  formatRaw(buf, sizeof buf, s, 173);
   ImuSample p;
-  CHECK(parseRawLine(buf, &p));
+  int pwm = 0;
+  CHECK(parseRawLine(buf, &p, &pwm));
+  CHECK_EQ(pwm, 173);
   CHECK_EQ(p.t_us, s.t_us);
   CHECK_NEAR(p.ax, s.ax, 1e-3);
   CHECK_NEAR(p.ay, s.ay, 1e-3);
@@ -16,6 +18,14 @@ TEST(raw_line_round_trip) {
   CHECK_NEAR(p.gx, s.gx, 1e-4);
   CHECK_NEAR(p.gy, s.gy, 1e-4);
   CHECK_NEAR(p.gz, s.gz, 1e-4);
+}
+
+TEST(raw_line_without_pwm_still_parses) {
+  ImuSample p;
+  int pwm = 0;
+  CHECK(parseRawLine("R,5,0,0,9.81,0,0,0", &p, &pwm));  // older log without the PWM column
+  CHECK_EQ(pwm, -1);
+  CHECK_NEAR(p.az, 9.81, 1e-4);
 }
 
 TEST(raw_line_rejects_other_lines) {

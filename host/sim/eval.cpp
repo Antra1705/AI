@@ -50,7 +50,7 @@ double mean(const std::vector<double>& v) {
 
 // ---------------------------------------------------------------- road
 
-int evalRoad(int runs) {
+int evalRoad(int runs, Domain domain, int classify_ms) {
   const Config configs[] = {
       {"Passive soft (servo fixed 45)", false, false, 45},
       {"Passive stiff (servo fixed 150)", false, false, 150},
@@ -63,8 +63,10 @@ int evalRoad(int runs) {
   struct Metrics {
     double smooth_sq = 0, gravel_sq = 0;
     long smooth_n = 0, gravel_n = 0;
-    std::vector<double> event_peak, pothole_reaction;
+    std::vector<double> event_peak, pothole_reaction, detect;
+    int detect_miss = 0;
     int bottom_outs = 0, events = 0, missed_stiff = 0;
+    int bottom_at_events = 0;  // within 1.5 s of a wheel reaching a breaker/pothole; the rest is on gravel
     double servo_travel = 0, distance = 0;
     int confusion[4][4] = {{0}};
     long uncertain = 0, scored = 0;
@@ -75,14 +77,16 @@ int evalRoad(int runs) {
     TrackOptions to;
     to.length_m = 40;
     to.rumble = false;
+    to.domain = domain;
     Track track = randomTrack(seed, to);
     std::mt19937 rng(seed);
-    VehicleParams vp = randomVehicle(rng);
+    VehicleParams vp = randomVehicle(rng, domain);
     std::vector<EventEntry> events = eventsOf(track);
 
     for (int k = 0; k < NC; ++k) {
       SimCart cart(track, vp, seed);
       configure(cart, configs[k], SpeedMode::STEP);  // equal speed for all: compare damping only
+      if (classify_ms > 0) cart.app.setClassifyPeriod((uint32_t)classify_ms);
       cart.begin();
       if (configs[k].fixed_servo >= 0) cart.command("servo " + std::to_string(configs[k].fixed_servo));
       cart.command("start");
@@ -90,8 +94,9 @@ int evalRoad(int runs) {
       WindowLabeler lab(cart.track);
       size_t next_event = 0;
       double last_event_t = -10, active_entry = -1, active_peak = 0;
-      bool active_pothole = false, reacted = false;
+      bool active_pothole = false, reacted = false, detected = false;
       int last_servo = cart.rig.servo.angle;
+      int last_bottoms = 0;
       long step = 0;
 
       cart.on_ms = [&] {
@@ -107,6 +112,7 @@ int evalRoad(int runs) {
           active_peak = 0;
           active_pothole = events[next_event].kind == TrackKind::POTHOLE;
           reacted = false;
+          detected = false;
           ++M.events;
           ++next_event;
           last_event_t = t;
@@ -119,6 +125,17 @@ int evalRoad(int runs) {
             M.pothole_reaction.push_back(since * 1000.0);
             reacted = true;
           }
+          // Detection: the classifier first puts > 50% on breaker + pothole.
+          if (!detected && configs[k].fixed_servo < 0) {
+            const Decision& d = cart.app.decision();
+            if (d.valid && d.p[SURFACE_BREAKER] + d.p[SURFACE_POTHOLE] > 0.5f && since < 0.5) {
+              M.detect.push_back(since * 1000.0);
+              detected = true;
+            } else if (since >= 0.5) {
+              ++M.detect_miss;
+              detected = true;
+            }
+          }
           if (since >= 0.5 && active_pothole && !reacted) {
             ++M.missed_stiff;
             reacted = true;
@@ -127,6 +144,10 @@ int evalRoad(int runs) {
             M.event_peak.push_back(active_peak);
             active_entry = -1;
           }
+        }
+        if (cart.car.bottomOuts() != last_bottoms) {
+          if (t - last_event_t <= 1.5) M.bottom_at_events += cart.car.bottomOuts() - last_bottoms;
+          last_bottoms = cart.car.bottomOuts();
         }
         if (step % 10 == 0) lab.record(t, cart.car.frontX(), cart.car.rearX(), tr.v);
         if (t - last_event_t > 1.5 && tr.v > 0.1) {
@@ -154,9 +175,10 @@ int evalRoad(int runs) {
     }
   }
 
-  std::printf("Closed-loop ride comparison: %d random tracks x 40 m (unseen in training), same cars,\n"
-              "same speed (PWM 200) for every strategy so only the damping differs. Lower is better\n"
-              "for every column except accuracy.\n\n", runs);
+  std::printf("Closed-loop ride comparison (%s carts and roads): %d random tracks x 40 m (unseen in\n"
+              "training), same cars, same speed (PWM 200) for every strategy so only the damping differs.\n"
+              "Classifier runs every %d ms. Lower is better for every column except accuracy.\n\n",
+              domainName(domain), runs, classify_ms > 0 ? classify_ms : (int)cfg::CLASSIFY_PERIOD_MS);
   std::printf("%-34s %8s %8s %9s %8s %9s %10s %8s\n", "Strategy", "smooth", "gravel", "event", "bottom", "servo",
               "pothole", "class.");
   std::printf("%-34s %8s %8s %9s %8s %9s %10s %8s\n", "", "RMS m/s2", "RMS m/s2", "peak m/s2", "outs/evt", "deg/m",
@@ -188,6 +210,24 @@ int evalRoad(int runs) {
               "servo deg/m: total servo movement per metre driven (actuator wear).\n"
               "pothole react: front wheel reaches the pothole -> servo physically at >= 140 deg\n"
               "               (miss = not within 0.5 s).\n");
+  std::printf("\nWhere the bottom-outs happen (per breaker/pothole): at the event itself (within 1.5 s) /\n"
+              "elsewhere (on gravel):\n");
+  for (int k = 0; k < NC; ++k) {
+    const Metrics& M = m[k];
+    std::printf("  %-34s %5.2f at events, %5.2f elsewhere\n", configs[k].name,
+                (double)M.bottom_at_events / std::max(1, M.events),
+                (double)(M.bottom_outs - M.bottom_at_events) / std::max(1, M.events));
+  }
+  std::printf("\nImpact detection (front wheel reaches a breaker or pothole -> classifier puts > 50%% on\n"
+              "breaker + pothole; miss = not within 0.5 s):\n");
+  for (int k = 0; k < NC; ++k) {
+    if (configs[k].fixed_servo >= 0) continue;
+    std::vector<double> d = m[k].detect;
+    std::sort(d.begin(), d.end());
+    std::printf("  %-34s avg %4.0f ms, median %4.0f ms, 90th pct %4.0f ms, %d missed of %zu\n", configs[k].name, mean(d),
+                d.empty() ? 0.0 : d[d.size() / 2], d.empty() ? 0.0 : d[(size_t)(0.9 * (d.size() - 1))],
+                m[k].detect_miss, d.size() + (size_t)m[k].detect_miss);
+  }
   const Metrics& deployed = m[NC - 1];
   int ok = 0, tot = 0;
   for (int i = 0; i < 4; ++i)
@@ -622,7 +662,8 @@ int recordSurface(const char* name, double seconds, unsigned seed) {
 // Characterise the actuator: for each surface, drive with the servo locked at
 // several stiffness settings and measure comfort and protection. The best
 // setting per surface becomes STIFF_<CLASS> in config.h (the curve's targets).
-int evalTune() {
+int evalTune(Domain domain) {
+  const bool shifted = domain == Domain::SHIFTED;
   const double S[] = {0.0, 0.2, 0.4, 0.6, 0.8, 1.0};
   const int NS = 6, SEEDS = 4;
   const char* names[4] = {"smooth", "gravel", "breaker", "pothole"};
@@ -643,22 +684,23 @@ int evalTune() {
         unsigned sd = 7000 + 100 * cls + seed;
         std::mt19937 rng(sd);
         std::uniform_real_distribution<double> u(0, 1);
-        Track t(sd);
+        Track t(sd, shifted ? 10.0 : 20.0, shifted ? 45.0 : 80.0);
         t.addSmooth(2.0);
         int events = 0;
         double surface_m = 20.0;
         if (cls == 0) t.addSmooth(surface_m);
-        if (cls == 1) t.addGravel(surface_m, 0.001 + 0.002 * u(rng));
+        if (cls == 1) t.addGravel(surface_m, shifted ? 0.002 + 0.0018 * u(rng) : 0.001 + 0.002 * u(rng));
         if (cls >= 2) {
           for (int e = 0; e < 8; ++e) {
-            if (cls == 2) t.addBreaker(0.01 + 0.02 * u(rng), 0.06 + 0.09 * u(rng));
-            else t.addPothole(0.01 + 0.02 * u(rng), 0.05 + 0.07 * u(rng));
+            double h = shifted ? 0.015 + 0.021 * u(rng) : 0.01 + 0.02 * u(rng);
+            if (cls == 2) t.addBreaker(h, 0.06 + 0.09 * u(rng));
+            else t.addPothole(h, 0.05 + 0.07 * u(rng));
             t.addSmooth(1.5);
             ++events;
           }
         }
         t.addSmooth(2.0);
-        VehicleParams vp = randomVehicle(rng);
+        VehicleParams vp = randomVehicle(rng, domain);
         vp.wear = 1.0;
         SimCart cart(t, vp, sd);
         cart.app.setSpeedMode(SpeedMode::STEP);

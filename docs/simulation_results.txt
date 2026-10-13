@@ -1,0 +1,165 @@
+
+================================================================
+1. Ride and damping
+================================================================
+Closed-loop ride comparison: 8 random tracks x 40 m (unseen in training), same cars,
+same speed (PWM 200) for every strategy so only the damping differs. Lower is better
+for every column except accuracy.
+
+Strategy                             smooth   gravel     event   bottom     servo    pothole   class.
+                                   RMS m/s2 RMS m/s2 peak m/s2 outs/evt     deg/m   react ms     acc.
+Passive soft (servo fixed 45)         0.178    1.419     47.74     8.68       1.0          -        -
+Passive stiff (servo fixed 150)       0.055    7.324     10.82     1.05       1.4          -        -
+SRA: rules + fixed angles             0.070    5.177     31.82     2.79      80.4 343 (0 miss)    93.3%
+Neural + fixed angles                 0.072    4.964     32.59     3.27      67.9 372 (13 miss)    97.5%
+Neural + graded curve (deployed)      0.057    2.180     13.54     1.38      63.4 201 (0 miss)    98.6%
+
+smooth/gravel RMS: body vertical acceleration away from events (comfort).
+event peak: largest body acceleration within 1 s of a breaker/pothole (protection).
+bottom outs/evt: suspension hitting its travel limit per breaker/pothole.
+servo deg/m: total servo movement per metre driven (actuator wear).
+pothole react: front wheel reaches the pothole -> servo physically at >= 140 deg
+               (miss = not within 0.5 s).
+
+Deployed classifier in closed loop: 98.6% correct, 4.3% of windows flagged uncertain.
+
+================================================================
+2. Obstacle speed control
+================================================================
+Obstacle approach: wall 4 m ahead, 20 runs per cell, noisy sonar (1 cm + 3% dropped echoes),
+braking 3.0 m/s^2. 'gap' is the worst closest approach; 'hard stops' counts emergency
+brakings (< 10 cm); 'decel' is the peak deceleration; 'speed flips' counts how often the
+speed command changed direction (jerky driving).
+
+Mode                     cruise        gap cm  hard stops      decel  speed flips     time s
+SRA steps (200/127/0)    0.45 m/s         5.8          20      3.0/s2         13.9        8.8
+Type-1 fuzzy             0.45 m/s        15.0           0      3.0/s2         12.8        9.7
+Interval Type-2 fuzzy    0.45 m/s        11.8           3      3.0/s2         17.3        9.8
+
+SRA steps (200/127/0)    0.70 m/s         2.6          20      3.0/s2          8.8        5.9
+Type-1 fuzzy             0.70 m/s        16.2           0      3.0/s2          8.4        6.3
+Interval Type-2 fuzzy    0.70 m/s        12.6           1      3.0/s2         10.0        6.3
+
+SRA steps (200/127/0)    0.90 m/s        -3.4          20      3.0/s2          7.0        4.7  CONTACT
+Type-1 fuzzy             0.90 m/s        14.2           0      3.0/s2          9.0        5.1
+Interval Type-2 fuzzy    0.90 m/s        14.2           0      3.0/s2         10.6        5.0
+
+The hard 10 cm emergency stop stays active in every mode; fuzzy control only shapes the
+approach. Real braking and top speed must be measured on the cart (see BRD R-3).
+
+================================================================
+3. Fail-safe behaviour
+================================================================
+IMU missing at power-on: start refused         PASS  ('Cannot start: IMU not responding')
+IMU unplugged while driving: stops             PASS  stopped after 39 ms (BRD T6: <= 200)
+  ... suspension returns to neutral            PASS  
+Ultrasonic unplugged while driving: stops      PASS  stopped after 109 ms (BRD T6: <= 200)
+Open space (nothing within 4 m): keeps driving PASS  
+Object suddenly < 2 cm away: emergency stop    PASS  (SRA version would have driven at full speed)
+10% dropped echoes: no false fault             PASS  
+IMU reconnects: fault stays until 'start'      PASS  
+
+Fail-safe checks: PASS
+
+================================================================
+4. State estimation (EKF)
+================================================================
+Attitude estimation over 5 random drives (sensor mounted 5 deg crooked, gyro and
+accelerometer bias, vibration). RMS error of roll+pitch vs. the true attitude, degrees.
+
+Estimator                                     smooth road   rough road
+EKF, noise follows classifier (deployed)            0.531        0.500
+EKF, fixed noise tuned for smooth road              0.507        0.496
+EKF, fixed noise tuned for rough road               0.508        0.499
+Accelerometer tilt only (no filter)                 3.898        4.539
+Vertical body velocity (used by the damping curve): RMS error 0.015 m/s.
+
+Same drives with a perfectly calibrated accelerometer (no bias), so only vibration
+and acceleration errors remain:
+
+Estimator                                     smooth road   rough road
+EKF, noise follows classifier (deployed)            0.287        0.229
+EKF, fixed noise tuned for smooth road              0.232        0.199
+EKF, fixed noise tuned for rough road               0.231        0.210
+Accelerometer tilt only (no filter)                 3.513        4.664
+Vertical body velocity (used by the damping curve): RMS error 0.013 m/s.
+
+With bias, every filter sits near the ~0.5 deg floor that an uncalibrated accelerometer
+bias causes (0.08 m/s^2 -> 0.47 deg); calibrate the MPU6050 offsets on the cart.
+
+================================================================
+5. Predictive maintenance
+================================================================
+Predictive maintenance: one reference-bump test per day for 40 days.
+Wear: healthy for 10 days, then damping falls 2% per day (shock oil leaking).
+
+  day  damping     zeta     status
+    1     100%   0.0985   LEARNING
+    2     100%   0.1445   LEARNING
+    3     100%   0.0774   LEARNING
+    4     100%   0.1098   LEARNING
+    5     100%   0.0914    HEALTHY
+    6     100%   0.1115    HEALTHY
+    7     100%   0.0873    HEALTHY
+    8     100%   0.1155    HEALTHY
+    9     100%   0.1207    HEALTHY
+   10     100%   0.1151    HEALTHY
+   11      98%   0.1065    HEALTHY
+   12      96%   0.1110    HEALTHY
+   15      90%   0.1039    HEALTHY
+   18      84%   0.0957    HEALTHY
+   21      78%   0.0894    HEALTHY
+   23      74%   0.0687      WATCH
+   24      72%   0.1017    HEALTHY
+   25      70%   0.0764      WATCH
+   26      68%   0.0806      WATCH
+   27      66%   0.0604      WATCH
+   28      64%   0.0746      WATCH
+   29      62%   0.0806      WATCH
+   30      60%   0.0665    SERVICE
+   31      58%   0.0665    SERVICE
+   32      56%   0.0642    SERVICE
+   33      54%   0.0485    SERVICE
+   34      52%   0.0537    SERVICE
+   35      50%   0.0717    SERVICE
+   36      48%   0.0544    SERVICE
+   37      46%   0.0549    SERVICE
+   38      44%   0.0620    SERVICE
+   39      42%   0.0658    SERVICE
+   40      40%   0.0523    SERVICE
+
+First WATCH on day 23 (damping 74%), first SERVICE on day 30 (damping 60%).
+Healthy shocks for 40 days: 0 false alarms.
+
+================================================================
+6. Uncertainty on an unseen surface
+================================================================
+Unseen surface: rumble strips (never in the training data), 5 drives.
+
+                                    flagged   mean servo     mean PWM
+Known surfaces                         1.3%         91.7        189.1
+Rumble strip (unseen)                  0.5%         50.7        165.0
+
+Rule-based classifier on the rumble strip: calls it gravel 100% of the time and has no
+uncertainty signal at all.
+Ensemble: flags 0.5% of rumble-strip windows vs 1.3% on known surfaces - it does NOT reliably notice this new surface;
+it mostly treats it like gravel. See docs/model_report.md for the offline numbers.
+
+================================================================
+0. Damping characterisation (sim tune) - source of the curve targets
+================================================================
+Damping characterisation: servo locked at each stiffness, 4 cars per cell, PWM 200.
+smooth/gravel cost = RMS body accel (m/s^2) + 3 x bottom-outs per metre
+breaker/pothole cost = mean peak body accel / 10 + bottom-outs per event
+
+surface    s=0.0 ( 45 deg)     s=0.2 ( 66 deg)     s=0.4 ( 87 deg)     s=0.6 (108 deg)     s=0.8 (129 deg)     s=1.0 (150 deg)  
+smooth     0.085                 0.057                 0.051                 0.049                 0.049                 0.049              
+gravel     1.170                 2.178                 3.267                 4.355                 5.419                 6.447              
+breaker    8.432                 4.285                 2.223                 1.137                 0.687                 0.590              
+pothole    17.832                9.090                 6.231                 5.158                 3.616                 2.847              
+
+Suggested curve targets (config.h):
+constexpr float STIFF_SMOOTH  = 0.8f;
+constexpr float STIFF_GRAVEL  = 0.0f;
+constexpr float STIFF_BREAKER = 1.0f;
+constexpr float STIFF_POTHOLE = 1.0f;

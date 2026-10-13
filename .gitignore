@@ -1,0 +1,6 @@
+host/build/
+host/data/*.csv
+*.o
+__pycache__/
+.DS_Store
+.venv/

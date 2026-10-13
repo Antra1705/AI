@@ -72,13 +72,13 @@ Open **http://localhost:8080**, then try:
 
 | Click | What you should see |
 |---|---|
-| **Start** | The cart drives. The surface tile follows the road (the true surface is shown under it), and the stiffness and speed charts change with the road. |
-| **Obstacle ahead** | The state changes to "Obstacle ahead", and speed ramps down to a gentle stop about 12–16 cm before the obstacle. **Clear** lets it continue. Obstacles also appear on their own every 20–30 s. |
-| **Neural / Rules**, **Graded curve / Fixed angles**, **Type-2 / Type-1 / Steps** | Switches between the advanced design and its simpler fallback while driving, so you can compare them live. |
-| **Unplug IMU** or **Unplug sonar** | The cart stops within about 0.1 s and shows a fault. Replug, then press **Start** again. |
-| **Stop**, then **Maintenance test** 5 times | Each test lays a 1.5 cm reference bump just ahead (on the real cart you drive over your own reference bump). The cart drives slowly over it and measures the damping. After 5 tests the baseline is learned and the tile shows *Healthy*. |
-| Move the **Shocks** slider to 50%, then **Maintenance test** a few more times | Worn shocks: the tile changes to *Watch*, then *Service*. |
-| **Show table** | All current values as a table. |
+| **Start** | The cart drives. The instrument cluster shows the detected road surface (ground truth beside it), the stiffness dial and the speed; below it, a 3D model of the cart drives over the road it has detected (drag to orbit, or pick Chase / Side / Top / Front; **Side** at the top right switches to the 2D side view). Its body bounces on springs damped by the real servo setting, leans with the Kalman filter's roll and pitch, and the springs light up as the suspension stiffens. The **Last 30 s** strip chart shows road, stiffness, motor, obstacle distance and pitch on one time axis: hover (or tap) it to read every value at that moment; **Pause** freezes it. |
+| **Place obstacle** | The state changes to "Obstacle ahead", and speed ramps down to a gentle stop about 12–16 cm before the obstacle (the shaded zones in the distance lane are slow and e-stop). **Remove obstacle** lets it continue. Obstacles also appear on their own every 20–30 s. |
+| **Neural / Rules**, **Graded / Fixed angles**, **Type-2 fuzzy / Type-1 / Steps** | Switches between the advanced design and its simpler fallback while driving, so you can compare them live. |
+| **Unplug IMU** or **Unplug sonar** | The cart stops within about 0.1 s and shows a fault. **Reconnect**, then press **Start** again. |
+| **Stop**, then **Maintenance test** 5 times | Each test lays a 1.5 cm reference bump just ahead (on the real cart you drive over your own reference bump). The cart drives slowly over it and measures the damping. After 5 tests the baseline is learned and *Shocks* shows *Healthy*. |
+| Move **Shock condition** to 50%, then **Maintenance test** a few more times | Worn shocks: *Shocks* changes to *Watch*, then *Service*. |
+| **All values** (bottom) | Every number the cart reports, as a table. |
 
 Stop the server with **Ctrl+C**. To run the simulation faster than real time, add
 `--speed 2`. If port 8080 is taken, add `--port 8090`.
@@ -269,6 +269,7 @@ tools/make_figures.py             report figures from the simulation results (ma
 tools/calibrate.py                thresholds for the rule-based fallback
 tools/record_cart.py              record raw IMU data from the real cart (over its WiFi or USB)
 tools/embed_dashboard.py          copy the dashboard page into the firmware after editing it
+tools/embed_fonts.py              embed the dashboard's fonts (Barlow, SIL OFL; host/dashboard/fonts/) into the page
 platformio.ini                    PlatformIO alternative to the Arduino IDE
 docs/                             algorithms, model report, simulation results, hardware bring-up guide
 ```

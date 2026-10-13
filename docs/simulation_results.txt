@@ -11,8 +11,8 @@ Strategy                             smooth   gravel     event   bottom     serv
 Passive soft (servo fixed 45)         0.178    1.419     47.74     8.68       1.0          -        -
 Passive stiff (servo fixed 150)       0.055    7.324     10.82     1.05       1.4          -        -
 SRA: rules + fixed angles             0.070    5.177     31.82     2.79      80.4 343 (0 miss)    93.3%
-Neural + fixed angles                 0.072    4.964     32.59     3.27      67.9 372 (13 miss)    97.5%
-Neural + graded curve (deployed)      0.057    2.180     13.54     1.38      63.4 201 (0 miss)    98.6%
+Neural + fixed angles                 0.072    4.981     32.60     3.33      63.4 371 (16 miss)    97.6%
+Neural + graded curve (deployed)      0.057    2.109     13.53     1.38      62.9 195 (0 miss)    98.7%
 
 smooth/gravel RMS: body vertical acceleration away from events (comfort).
 event peak: largest body acceleration within 1 s of a breaker/pothole (protection).
@@ -21,7 +21,7 @@ servo deg/m: total servo movement per metre driven (actuator wear).
 pothole react: front wheel reaches the pothole -> servo physically at >= 140 deg
                (miss = not within 0.5 s).
 
-Deployed classifier in closed loop: 98.6% correct, 4.3% of windows flagged uncertain.
+Deployed classifier in closed loop: 98.7% correct, 4.3% of windows flagged uncertain.
 
 ================================================================
 2. Obstacle speed control
@@ -41,8 +41,8 @@ Type-1 fuzzy             0.70 m/s        16.2           0      3.0/s2          8
 Interval Type-2 fuzzy    0.70 m/s        12.6           1      3.0/s2         10.0        6.3
 
 SRA steps (200/127/0)    0.90 m/s        -3.4          20      3.0/s2          7.0        4.7  CONTACT
-Type-1 fuzzy             0.90 m/s        14.2           0      3.0/s2          9.0        5.1
-Interval Type-2 fuzzy    0.90 m/s        14.2           0      3.0/s2         10.6        5.0
+Type-1 fuzzy             0.90 m/s        14.3           0      3.0/s2          8.1        5.1
+Interval Type-2 fuzzy    0.90 m/s        15.6           0      3.0/s2         11.9        5.0
 
 The hard 10 cm emergency stop stays active in every mode; fuzzy control only shapes the
 approach. Real braking and top speed must be measured on the cart (see BRD R-3).
@@ -68,10 +68,10 @@ Attitude estimation over 5 random drives (sensor mounted 5 deg crooked, gyro and
 accelerometer bias, vibration). RMS error of roll+pitch vs. the true attitude, degrees.
 
 Estimator                                     smooth road   rough road
-EKF, noise follows classifier (deployed)            0.531        0.500
-EKF, fixed noise tuned for smooth road              0.507        0.496
+EKF, noise follows classifier (deployed)            0.530        0.501
+EKF, fixed noise tuned for smooth road              0.507        0.497
 EKF, fixed noise tuned for rough road               0.508        0.499
-Accelerometer tilt only (no filter)                 3.898        4.539
+Accelerometer tilt only (no filter)                 3.932        4.835
 Vertical body velocity (used by the damping curve): RMS error 0.015 m/s.
 
 Same drives with a perfectly calibrated accelerometer (no bias), so only vibration
@@ -79,9 +79,9 @@ and acceleration errors remain:
 
 Estimator                                     smooth road   rough road
 EKF, noise follows classifier (deployed)            0.287        0.229
-EKF, fixed noise tuned for smooth road              0.232        0.199
-EKF, fixed noise tuned for rough road               0.231        0.210
-Accelerometer tilt only (no filter)                 3.513        4.664
+EKF, fixed noise tuned for smooth road              0.232        0.198
+EKF, fixed noise tuned for rough road               0.231        0.209
+Accelerometer tilt only (no filter)                 3.908        5.222
 Vertical body velocity (used by the damping curve): RMS error 0.013 m/s.
 
 With bias, every filter sits near the ~0.5 deg floor that an uncalibrated accelerometer
@@ -137,12 +137,12 @@ Healthy shocks for 40 days: 0 false alarms.
 Unseen surface: rumble strips (never in the training data), 5 drives.
 
                                     flagged   mean servo     mean PWM
-Known surfaces                         1.3%         91.7        189.1
-Rumble strip (unseen)                  0.5%         50.7        165.0
+Known surfaces                         1.7%         91.5        189.1
+Rumble strip (unseen)                  0.0%         49.7        165.0
 
 Rule-based classifier on the rumble strip: calls it gravel 100% of the time and has no
 uncertainty signal at all.
-Ensemble: flags 0.5% of rumble-strip windows vs 1.3% on known surfaces - it does NOT reliably notice this new surface;
+Ensemble: flags 0.0% of rumble-strip windows vs 1.7% on known surfaces - it does NOT reliably notice this new surface;
 it mostly treats it like gravel. See docs/model_report.md for the offline numbers.
 
 ================================================================

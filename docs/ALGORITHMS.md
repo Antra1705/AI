@@ -2,7 +2,7 @@
 
 How the software works, why each part is designed the way it is, and what the
 simulation shows. Every number below comes from simulated drives
-(`docs/simulation_results.txt`, `docs/model_report.md`). They show the design
+(`docs/simulation_results.txt`, `docs/model_report.md`; figures in `docs/figures/`). They show the design
 works as intended on a physically consistent model; they are **not** measurements
 of the real cart, and every threshold marked CALIBRATE in `config.h` has to be
 re-derived from recordings once the hardware exists.
@@ -47,23 +47,31 @@ acceleration magnitude makes them independent of how the sensor is mounted.
 | 9–13 | **FFT band energies** 1–2, 3–5, 6–10, 11–20, 21–49 Hz | frequency signature (Hann-windowed DFT) |
 | 14–15 | log gyro std, largest gyro rise | rotation from uneven ground |
 
-### Model (`ml_model.cpp`, trained by `host/train`)
+### Model (`ml_model.cpp`, trained by `tools/train_torch.py` or `host/train`)
+Two independently written trainers produce the same artefacts:
+- `tools/train_torch.py` (PyTorch) is the readable reference and the source of the deployed model.
+- `host/train` (dependency-free C++) is the alternative when no Python packages are available.
+
+Both reach the same accuracy (99.3%, macro-F1 0.970 vs 0.968), and the same parity
+test checks both exports against the on-device int8 code. Two separate
+implementations agreeing is an independent check of the quantization pipeline.
+
 - 5 multilayer perceptrons, 16 → 16 → 16 → 4, ReLU.
 - Each is trained on a bootstrap resample with class-weighted cross-entropy (Adam, 30 epochs).
 - **Quantization-aware training (#6):** after float training, the int8 input range of each layer is calibrated (99.99th percentile of |activation|). Then 12 epochs fine-tune with weights and activations rounded to int8 in the forward pass, and gradients pass straight through (straight-through estimator) except where values were clipped.
 - **Deployed arithmetic:** int8 weights, int8 activations, int32 accumulation, one float rescale per neuron. Weights total 2,880 bytes.
-- A parity test (`test_ml_model.cpp`) checks that the on-device int8 code reproduces the trainer's independently written fake-quantized forward pass on real test windows.
+- A parity test (`test_ml_model.cpp`) checks that the on-device int8 code reproduces the trainer's own fake-quantized forward pass (PyTorch autograd for the deployed model) on real test windows.
 
 ### Results (test runs never seen in training)
 | Model | Accuracy | Macro-F1 |
 |---|---|---|
 | Rule-based, thresholds tuned on the same data | 83.9% | 0.725 |
-| 1 MLP float32 | 99.1% | 0.957 |
-| 1 MLP int8, post-training quantization | 99.1% | 0.957 |
-| 1 MLP int8, QAT | 99.1% | 0.956 |
-| **Ensemble int8 QAT (deployed)** | **99.3%** | **0.968** |
+| 1 MLP float32 | 99.2% | 0.961 |
+| 1 MLP int8, post-training quantization | 99.2% | 0.963 |
+| 1 MLP int8, QAT | 99.2% | 0.962 |
+| **Ensemble int8 QAT (deployed)** | **99.3%** | **0.970** |
 
-In closed loop on unseen tracks, the classifier is correct on 98.6% of windows.
+In closed loop on unseen tracks, the classifier is correct on 98.7% of windows.
 
 **Honest note on QAT:** at this model size, plain post-training quantization already
 loses nothing, so QAT gives no measurable gain here. It is kept because it costs
@@ -83,7 +91,7 @@ Two complementary estimates, computed in `mlPredict`:
    - novelty = min over classes of the squared Mahalanobis distance.
    - It is high when the input looks like none of the trained surfaces.
 
-A window is *uncertain* when confidence < 0.983, MI > 0.0086 or novelty > 62.9. These
+A window is *uncertain* when confidence < 0.975, MI > 0.0111 or novelty > 62.9. These
 thresholds come from validation data (the 2.5th / 97.5th / 99th percentiles of
 correct windows). Uncertainty is not only a flag: it feeds the damping curve
 continuously (section 4) and the fuzzy speed controller (section 6).
@@ -91,16 +99,16 @@ continuously (section 4) and the fuzzy speed controller (section 6).
 | Result (offline test set) | Value |
 |---|---|
 | Coverage (windows accepted) | 95.0% |
-| Accuracy on accepted / flagged windows | 99.9% / 87.9% |
-| Transition windows flagged | 50.8% |
-| Unseen surface (rumble strip) flagged | 12.2% (single model + confidence gate: 4.2%) |
-| Unseen-surface detection AUROC, deployed rule / single model | 0.78 / 0.66 |
+| Accuracy on accepted / flagged windows | 99.9% / 88.3% |
+| Transition windows flagged | 50.0% |
+| Unseen surface (rumble strip) flagged | 11.2% (single model + confidence gate: 6.7%) |
+| Unseen-surface detection AUROC, deployed rule / single model | 0.78 / 0.74 |
 
 **Limitation:** detection of a genuinely new surface is weak. In closed loop the
 rumble strip is mostly treated as gravel, so the suspension goes soft, which is a
 benign response for that kind of vibration. The ensemble and novelty model are
-clearly better than the simplified single-model gate (AUROC 0.78 vs 0.66), but this
-is not a guarantee of detecting every new surface.
+better than the simplified single-model gate (AUROC 0.78 vs 0.74), but the gap is
+small and this is not a guarantee of detecting every new surface.
 
 ---
 
@@ -119,7 +127,10 @@ s_sky  = 0.15 · min(|v_z| / 0.05 m/s, 1)                     extra damping when
 s      = clamp(max(s_base, s_risk) + s_sky, 0, 1)
 ```
 
-**Per-class targets S[c] were measured, not guessed** (`sim tune`). The servo was
+Figure: `docs/figures/response_curve.png`.
+
+**Per-class targets S[c] were measured, not guessed** (`sim tune`; figure
+`docs/figures/damping_characterisation.png`). The servo was
 locked at six settings on each surface, and comfort and protection were measured:
 
 | Surface | soft 45° | … | stiff 150° | Best |
@@ -138,17 +149,19 @@ This contradicts the original SRA mapping, which put gravel at a medium 110°.
 - the **impact reflex** jumps straight to full stiffness on one very sharp sample (jerk > 3000 m/s³, set above gravel's 99th percentile), without waiting for the 10 Hz classifier.
 
 ### Closed-loop evidence (8 unseen tracks, same cars and speed for every strategy)
+Figure: `docs/figures/ride_comparison.png`.
+
 | Strategy | Gravel RMS | Event peak | Bottom-outs / event | Servo °/m | Missed potholes |
 |---|---|---|---|---|---|
 | Passive soft (45°) | **1.42** | 47.7 | 8.68 | 1 | – |
 | Passive stiff (150°) | 7.32 | **10.8** | **1.05** | 1 | – |
 | SRA: rules + fixed angles | 5.18 | 31.8 | 2.79 | 80 | 0 |
-| Neural + fixed angles | 4.96 | 32.6 | 3.27 | 68 | **13** |
-| **Neural + graded curve** | 2.18 | 13.5 | 1.38 | 63 | **0** |
+| Neural + fixed angles | 4.98 | 32.6 | 3.33 | 63 | **16** |
+| **Neural + graded curve** | 2.11 | 13.5 | 1.38 | 63 | **0** |
 
-- **Against the SRA design:** 58% less gravel vibration, 57% lower peak jolt at breakers and potholes, 51% fewer bottom-outs, 21% less servo movement.
+- **Against the SRA design:** 59% less gravel vibration, 57% lower peak jolt at breakers and potholes, 51% fewer bottom-outs, 22% less servo movement.
 - **Against either passive setting:** no single fixed setting wins on both comfort and protection. The adaptive system gets close to the best of each: near-stiff protection with much better gravel comfort than stiff.
-- **Neural classifier on fixed angles missed 13 potholes.** It falls back to neutral whenever it is unsure. The curve's protective floor is what removes those misses, which is direct evidence for the graded mapping.
+- **Neural classifier on fixed angles missed 16 potholes.** It falls back to neutral whenever it is unsure. The curve's protective floor is what removes those misses, which is direct evidence for the graded mapping.
 
 **Limitation:** the system reacts; it cannot see a pothole before the wheel hits
 it. The front wheel's impact is absorbed at whatever setting the suspension was
@@ -193,11 +206,13 @@ The fuzzy controller only shapes speed *inside* the safety envelope. The hard
 While approaching an obstacle, speed may only decrease unless the obstacle moves
 more than 10 cm away. This stops noisy echoes from causing re-acceleration.
 
+Figure: `docs/figures/obstacle_approach.png`.
+
 | Wall approach, 20 runs, noisy sonar | SRA steps | Type-1 | Type-2 |
 |---|---|---|---|
 | 0.45 m/s: worst gap / hard emergency stops | 5.8 cm / 20 | 15.0 cm / 0 | 11.8 cm / 3 |
 | 0.70 m/s | 2.6 cm / 20 | 16.2 cm / 0 | 12.6 cm / 1 |
-| 0.90 m/s | **hit the wall** / 20 | 14.2 cm / 0 | 14.2 cm / 0 |
+| 0.90 m/s | **hit the wall** / 20 | 14.3 cm / 0 | 15.6 cm / 0 |
 
 - **Both fuzzy controllers stop gently and never hit the wall**; the SRA steps always end in an emergency stop and collide at 0.9 m/s.
 - **Honest finding:** in this simulation, **Type-2 is no better than Type-1**. It stops slightly closer and its speed command is a little less steady. It is the default because the project specification asks for it. `speed t1` switches modes, and the two should be compared on the real cart.
@@ -240,7 +255,7 @@ Simulated fail-safe checks, all passing:
 - **WATCH:** CUSUM > 3 or a 15% drop. **SERVICE:** CUSUM > 6 or a 30% drop.
 - The record is stored in flash (IStorage).
 
-**Result:** with wear of 2% per day starting on day 10, WATCH is raised at 74%
+**Result** (figure `docs/figures/maintenance_drift.png`): with wear of 2% per day starting on day 10, WATCH is raised at 74%
 damping and SERVICE at 60%. Healthy shocks produced 0 false alarms in 40 days, even
 though single tests scatter widely (ζ 0.077–0.144 when healthy). That scatter is
 why the drift detectors are needed.

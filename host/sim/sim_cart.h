@@ -31,7 +31,7 @@ class SimCart {
   double time() const { return (double)rig.clock.t_us * 1e-6; }
   double gapCm() const;  // distance from the front bumper to the wall (cm); large if none
 
-  const Track track;
+  Track track;  // live mode may lay a reference bump ahead of the cart
   FakeRig rig;
   Vehicle car;
   App app;

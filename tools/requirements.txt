@@ -1,0 +1,6 @@
+# Python packages for training and figures (the cart itself needs none).
+#   python3 -m venv .venv && .venv/bin/pip install -r tools/requirements.txt
+numpy==2.5.4
+torch==2.14.1
+scikit-learn==1.9.1
+matplotlib==3.11.2

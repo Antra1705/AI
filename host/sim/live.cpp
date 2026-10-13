@@ -8,8 +8,11 @@
 //           sim imu off|on   unplug / replug the IMU
 //           sim sonar off|on unplug / replug the ultrasonic sensor
 //           sim auto on|off  obstacles appear by themselves every ~25 s (default on)
+//         'maint test' also lays a smooth stretch with the 1.5 cm reference bump just
+//         ahead of the cart (on the real cart you drive it over your reference bump).
 // stdout  everything the cart prints (J,{...} JSON at 10 Hz, event lines), plus
 //         S,{...} lines with the simulator's ground truth for the dashboard.
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -75,6 +78,12 @@ int runLive(double speed) {
         std::string line = pending.front();
         pending.pop_front();
         if (line.compare(0, 4, "sim ") != 0) {
+          if (line == "maint test" && cart.app.state() == RunState::IDLE) {
+            double from = cart.car.frontX() + 0.05;
+            cart.track.placeReferenceBump(from, from + 6.0, from + 1.2, 0.015, 0.10);
+            cart.wall_x = -1;
+            std::printf("# sim: reference bump placed 1.2 m ahead\n");
+          }
           cart.command(line);
           continue;
         }
@@ -96,6 +105,7 @@ int runLive(double speed) {
 
     // Obstacles that appear and are taken away again, so the approach logic shows up on its own.
     double t = cart.time();
+    if (cart.app.state() == RunState::MAINT) next_auto = std::max(next_auto, t + 10.0);  // no obstacles during the test
     if (auto_obstacles && cart.wall_x < 0 && t > next_auto && cart.car.truth().v > 0.1) {
       cart.wall_x = cart.car.truth().x + 0.10 + 1.6;
       std::printf("# sim: obstacle placed 1.6 m ahead\n");

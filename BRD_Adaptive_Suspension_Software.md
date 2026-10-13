@@ -191,15 +191,15 @@ The classifier must be a model trained on windowed IMU data with engineered feat
 
 ### BR-15 8-bit deployment (quantization-aware training) — **M**
 The model must run in 8-bit integer arithmetic on the ESP32, trained with quantization-aware training.
-- **Acceptance:** On-device int8 outputs match the trainer's reference within tolerance (parity test), and int8 accuracy is within 1 point of float. *(Simulation: equal.)*
+- **Acceptance:** On-device int8 outputs match the trainer's reference within tolerance (parity test), and int8 accuracy is within 1 point of float. *(Simulation: equal; two independent trainers, PyTorch and C++, agree.)*
 
 ### BR-16 Uncertainty and safety fallback — **M**
 The system must estimate its own uncertainty (ensemble disagreement and input novelty) and fall back to a safe behaviour when unsure: a safe middle stiffness, plus lower speed.
-- **Acceptance:** Accepted windows are more accurate than flagged ones, and uncertainty measurably shifts the damping and speed commands. *(Simulation: 99.9% vs 87.9%. Detection of a never-seen surface is weak, AUROC 0.78; see docs/ALGORITHMS.md.)*
+- **Acceptance:** Accepted windows are more accurate than flagged ones, and uncertainty measurably shifts the damping and speed commands. *(Simulation: 99.9% vs 88.3%. Detection of a never-seen surface is weak, AUROC 0.78; see docs/ALGORITHMS.md.)*
 
 ### BR-17 Graded confidence-to-damping curve — **M** (core contribution)
 The damping command must be a continuous function of the class probabilities and confidence, shaped to the actuator's response time, not a binary or per-class switch.
-- **Acceptance:** In closed loop, fewer bottom-outs and lower impact peaks than the SRA fixed-angle design, with no missed potholes. *(Simulation: −51% bottom-outs, −57% impact peak, 0 misses vs 13 for the same classifier on fixed angles.)*
+- **Acceptance:** In closed loop, fewer bottom-outs and lower impact peaks than the SRA fixed-angle design, with no missed potholes. *(Simulation: −51% bottom-outs, −57% impact peak, 0 misses vs 16 for the same classifier on fixed angles.)*
 
 ### BR-18 Extended Kalman Filter — **S**
 The system should estimate attitude, gyro bias and vertical body velocity with an EKF, using classifier confidence to set the accelerometer noise.
@@ -229,7 +229,7 @@ The system should stream state, classification, uncertainty, actuator and mainte
 
 ### 7.2 Constraints
 - C1. Single-microcontroller, bare-metal Arduino loop. No RTOS tasks are required, but the loop must never block for long (no `delay()` in the main path).
-- C2. No ML library on the ESP32. The model is trained on a computer (host/train) and compiled in as int8 tables (about 3 kB).
+- C2. No ML library on the ESP32. The model is trained on a computer (PyTorch, `tools/train_torch.py`; or the dependency-free C++ trainer) and compiled in as int8 tables (about 3 kB).
 - C3. ESP32 limits: about 320 KB RAM, 4 MB flash (typical dev board).
 - C4. Battery-powered, so runtime depends on the hardware power budget.
 

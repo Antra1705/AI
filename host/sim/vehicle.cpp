@@ -62,6 +62,14 @@ void Track::addRumble(double len) {
   end_ += len;
 }
 
+void Track::placeReferenceBump(double from, double to, double bump_at, double height_m, double length_m) {
+  std::vector<TrackFeature> kept;
+  for (const TrackFeature& f : features_)
+    if (f.x1 < from || f.x0 > to) kept.push_back(f);
+  kept.push_back(TrackFeature{TrackKind::BREAKER, bump_at, bump_at + length_m, height_m});
+  features_ = kept;
+}
+
 double Track::sumWaves(const std::vector<Wave>& w, double x) const {
   double s = 0.0;
   for (const Wave& wv : w) s += wv.amp * std::sin(wv.k * x + wv.phase);

@@ -36,6 +36,9 @@ class Track {
   void addBreaker(double height_m, double length_m);
   void addPothole(double depth_m, double length_m);
   void addRumble(double len);
+  // Live mode: make [from, to] plain smooth road with one reference bump at bump_at
+  // (removes any feature overlapping that stretch).
+  void placeReferenceBump(double from, double to, double bump_at, double height_m, double length_m);
 
   double length() const { return end_; }
   double elevation(double x) const;  // m
